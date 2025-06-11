@@ -1,0 +1,23 @@
+# Core dependencies
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# Database
+supabase>=2.0.0
+
+# Web scraping
+selenium>=4.0.0
+webdriver-manager>=3.8.0
+playwright>=1.30.0
+
+# API server
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+
+# Utilities
+urllib3>=1.26.0
+lxml>=4.9.0
+httpx>=0.24.0
+pydantic>=2.0.0
