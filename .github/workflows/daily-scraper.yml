@@ -1,0 +1,26 @@
+name: Daily Scraper
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # 7 AM GMT
+  workflow_dispatch:  # Manual trigger button
+
+jobs:
+  scrape:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+      
+      - name: Install dependencies
+        run: |
+          pip3 install -r requirements.txt
+      
+      - name: Run scraper
+        run: python3 scraper.py
