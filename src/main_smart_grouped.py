@@ -3,9 +3,9 @@ Integration script to replace the existing scraping workflow with smart grouped 
 This replaces the slower Playwright-based approach with fast network requests and smart grouping.
 """
 
-from scrape_grouping import SmartGroupingOrchestrator
+from orchestrator_grouped import SmartGroupingOrchestrator
 from supabase_storage import SupabaseStorage
-from deal_notifications import DealNotificationPipeline
+from deal_notification_pipeline import DealNotificationPipeline
 import json
 from datetime import datetime
 import argparse

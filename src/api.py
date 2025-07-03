@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 import os
 from datetime import datetime
 import json
+from pydantic import BaseModel
 
 app = FastAPI(title="AutoTrader Deal Finder API")
 
@@ -191,3 +192,81 @@ async def get_storage_stats():
         stats["storage_systems"]["supabase"] = {"error": str(e)}
     
     return stats
+
+@app.get("/api/vehicle-data")
+async def get_vehicle_data():
+    """Get available makes and models from configuration."""
+    try:
+        from .config import TARGET_VEHICLES_BY_MAKE
+        
+        # Create a list of all makes
+        makes = list(TARGET_VEHICLES_BY_MAKE.keys())
+        
+        # Create make-model mapping
+        make_models = TARGET_VEHICLES_BY_MAKE
+        
+        # Create a flat list of all models for reference
+        all_models = []
+        for make, models in TARGET_VEHICLES_BY_MAKE.items():
+            for model in models:
+                all_models.append({"make": make, "model": model})
+        
+        return {
+            "makes": sorted(makes),
+            "make_models": make_models,
+            "all_models": all_models,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving vehicle data: {str(e)}")
+
+@app.get("/api/models/{make}")
+async def get_models_for_make(make: str):
+    """Get available models for a specific make."""
+    try:
+        from .config import TARGET_VEHICLES_BY_MAKE
+        
+        if make not in TARGET_VEHICLES_BY_MAKE:
+            raise HTTPException(status_code=404, detail=f"Make '{make}' not found")
+        
+        models = TARGET_VEHICLES_BY_MAKE[make]
+        
+        return {
+            "make": make,
+            "models": sorted(models),
+            "count": len(models),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving models for make '{make}': {str(e)}")
+
+class CheckoutSessionRequest(BaseModel):
+    priceId: str
+    mode: str
+    billingPeriod: str
+
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(request: CheckoutSessionRequest):
+    """Create a Stripe checkout session."""
+    try:
+        # For now, return a mock URL for testing
+        # In production, this would integrate with actual Stripe API
+        print(f"📧 Creating checkout session for {request.billingPeriod} plan with price ID: {request.priceId}")
+        
+        # Mock Stripe checkout URL
+        checkout_url = f"https://checkout.stripe.com/c/pay/mock-session-{request.billingPeriod}"
+        
+        return {
+            "url": checkout_url,
+            "success": True,
+            "session_id": f"cs_mock_{request.billingPeriod}_session"
+        }
+    except Exception as e:
+        print(f"❌ Error creating checkout session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
