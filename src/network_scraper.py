@@ -308,8 +308,15 @@ def convert_api_car_to_deal(car_data: Dict) -> Dict:
         else:
             deal_url = ""
         
-        # Extract price
-        price_str = car_data.get('price', '').replace('£', '').replace(',', '') if car_data.get('price') else ''
+        # Extract price - handle both string and integer values
+        price_value = car_data.get('price')
+        if price_value is None:
+            price_str = ''
+        elif isinstance(price_value, int):
+            price_str = str(price_value)
+        else:
+            # Handle string values by removing currency symbols and commas
+            price_str = str(price_value).replace('£', '').replace(',', '')
         try:
             price = int(price_str) if price_str.isdigit() else 0
         except:
