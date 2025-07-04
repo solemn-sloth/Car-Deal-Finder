@@ -4,10 +4,12 @@ Bridges the gap between the GraphQL API response format and the existing analyze
 """
 import re
 from typing import Dict, List, Optional
+from network_scraper import convert_api_car_to_deal
 
 class NetworkDataAdapter:
     """
     Converts vehicle data from network request API format to analyzer-compatible format.
+    Now uses the robust convert_api_car_to_deal() function for consistent processing.
     """
     
     @staticmethod
@@ -37,251 +39,77 @@ class NetworkDataAdapter:
         if not advert_id:
             raise ValueError("Vehicle missing advertId")
         
-        # Extract basic data with safe defaults and None handling
-        title = api_vehicle.get('title') or ''
-        subtitle = api_vehicle.get('subTitle') or ''
-        price_str = api_vehicle.get('price') or '£0'
-        location = api_vehicle.get('location') or ''
-        seller_name = api_vehicle.get('sellerName') or ''
-        seller_type = api_vehicle.get('sellerType') or 'TRADE'
-        
-        # Extract year and mileage from badges with enhanced fallback
-        year = 0
-        mileage = 0
-        
-        badges = api_vehicle.get('badges') or []
-        for badge in badges:
-            if not isinstance(badge, dict) or badge is None:
-                continue
+        try:
+            # Use the robust convert_api_car_to_deal function from network_scraper
+            # This ensures consistent processing including image URLs, specs, and fallback logic
+            converted_deal = convert_api_car_to_deal(api_vehicle)
+            
+            if not converted_deal or 'processed' not in converted_deal:
+                raise ValueError(f"Failed to convert vehicle {advert_id}")
+            
+            processed_data = converted_deal['processed']
+            
+            # Map the processed data to analyzer-compatible format
+            analyzer_vehicle = {
+                # Core fields (directly mapped)
+                'url': processed_data.get('url', ''),
+                'title': processed_data.get('title', ''),
+                'subtitle': processed_data.get('subtitle', ''),
+                'full_title': f"{processed_data.get('title', '')} {processed_data.get('subtitle', '')}".strip(),
+                'price': processed_data.get('price_raw', ''),
+                'price_numeric': processed_data.get('price', 0),
+                'year': processed_data.get('year', 0),
+                'mileage': processed_data.get('mileage', 0),
+                'location': processed_data.get('location', ''),
+                'seller_type': 'dealer' if processed_data.get('seller_type') == 'TRADE' else 'private',
+                'seller_name': processed_data.get('seller_name', ''),
                 
-            badge_text = badge.get('displayText') or ''
-            if not badge_text:
-                continue
+                # Vehicle specifications (with fallback logic already applied)
+                'make': processed_data.get('make', ''),
+                'model': processed_data.get('model', ''),
+                'engine_size': processed_data.get('engine_size'),
+                'fuel_type': processed_data.get('fuel_type'),
+                'transmission': processed_data.get('transmission'),
+                'body_type': processed_data.get('body_type'),
+                'doors': processed_data.get('doors'),
+                
+                # Additional fields
+                'dealer_review_rating': processed_data.get('dealer_rating'),
+                'dealer_review_count': processed_data.get('dealer_review_count'),
+                'attention_grabber': processed_data.get('attention_grabber'),
+                'distance': processed_data.get('distance'),
+                'number_of_images': processed_data.get('image_count', 0),
+                'has_video': processed_data.get('has_video', False),
+                'has_360_spin': processed_data.get('has_360_spin', False),
+                'manufacturer_approved': processed_data.get('manufacturer_approved', False),
+                
+                # Image URLs (now properly processed)
+                'image_url': processed_data.get('image_url', ''),
+                'image_url_2': processed_data.get('image_url_2', ''),
+                
+                # Additional processed fields that might be useful
+                'description': processed_data.get('description', ''),
+                'badges': processed_data.get('badges', []),
+                'listing_type': processed_data.get('listing_type'),
+                'condition': processed_data.get('condition'),
+                'price_indicator_rating': processed_data.get('price_indicator_rating'),
+                'rrp': processed_data.get('rrp'),
+                'discount': processed_data.get('discount'),
+                'finance_info': processed_data.get('finance_info'),
+                'pre_reg': processed_data.get('pre_reg', False),
+                'vehicle_location': processed_data.get('vehicle_location', ''),
+                'dealer_logo': processed_data.get('dealer_logo', ''),
+                'dealer_link': processed_data.get('dealer_link', ''),
+                'fpa_link': processed_data.get('fpa_link', ''),
+                'euro_standard': processed_data.get('euro_standard'),
+                'trim_level': processed_data.get('trim_level'),
+                'stop_start': processed_data.get('stop_start', False),
+            }
             
-            # Extract year from "2013 (13 reg)" format
-            if 'reg' in badge_text.lower():
-                year_match = re.search(r'(\d{4})', badge_text)
-                if year_match:
-                    year = int(year_match.group(1))
+            return analyzer_vehicle
             
-            # Extract mileage from "99,680 miles" format
-            if 'miles' in badge_text.lower():
-                mileage_match = re.search(r'([\d,]+)', badge_text)
-                if mileage_match:
-                    mileage_str = mileage_match.group(1).replace(',', '')
-                    try:
-                        mileage = int(mileage_str)
-                    except ValueError:
-                        pass
-        
-        # Extract price numeric value with better error handling
-        price_numeric = 0
-        if price_str:
-            price_match = re.search(r'[\d,]+', price_str.replace('£', ''))
-            if price_match:
-                price_str_clean = price_match.group().replace(',', '')
-                try:
-                    price_numeric = int(price_str_clean)
-                except ValueError:
-                    # If we can't parse price, try to get it from tracking context
-                    pass
-        
-        # Get tracking context data (safely handle missing/None context)
-        tracking_context = api_vehicle.get('trackingContext') or {}
-        advert_context = tracking_context.get('advertContext') or {}
-        
-        # Override with tracking context data if available, otherwise use extracted values
-        if 'year' in advert_context and advert_context['year']:
-            year = advert_context['year']
-        if 'price' in advert_context and advert_context['price']:
-            price_numeric = advert_context['price']
-        
-        # If we still don't have year/mileage, try to extract from title
-        full_title = f"{title} {subtitle}".strip()
-        if year == 0:
-            year_match = re.search(r'(\d{4})', full_title)
-            if year_match:
-                try:
-                    potential_year = int(year_match.group(1))
-                    if 2000 <= potential_year <= 2025:  # Reasonable year range
-                        year = potential_year
-                except ValueError:
-                    pass
-        
-        # If no price found anywhere, this vehicle is probably invalid
-        if price_numeric <= 0:
-            raise ValueError(f"Vehicle {deal_url or advert_id} has no valid price")
-        
-        # If no year found, this is suspicious but we'll allow it with warning
-        if year < 2000:
-            print(f"⚠️  Warning: Vehicle {deal_url or advert_id} has invalid year: {year}")
-        
-        # Extract vehicle specifications from title/subtitle
-        specs = NetworkDataAdapter._extract_specs_from_title(full_title)
-        
-        # Get make/model from tracking context or try to extract from title
-        make = advert_context.get('make') or ''
-        model = advert_context.get('model') or ''
-        
-        if not make and title:
-            # Try to extract make from title (first word usually)
-            title_words = title.split()
-            if title_words:
-                make = title_words[0]
-        
-        if not model and len(title.split()) > 1:
-            # Try to extract model from title (second word usually)
-            title_words = title.split()
-            if len(title_words) > 1:
-                model = title_words[1]
-        
-        # Convert seller type
-        seller_type_mapped = 'dealer' if seller_type == 'TRADE' else 'private'
-        
-        # Build the deal URL from advert_id
-        deal_url = f"https://www.autotrader.co.uk/car-details/{advert_id}" if advert_id else ""
-        
-        # Create analyzer-compatible vehicle record
-        analyzer_vehicle = {
-            # Required core fields
-            'url': deal_url,
-            'title': title,
-            'subtitle': subtitle,
-            'full_title': full_title,
-            'price': price_str,
-            'price_numeric': price_numeric,
-            'year': year,
-            'mileage': mileage,
-            'location': location,
-            'seller_type': seller_type_mapped,
-            'seller_name': seller_name,
-            
-            # Vehicle specifications
-            'make': make,
-            'model': model,
-            'engine_size': specs.get('engine_size'),
-            'fuel_type': specs.get('fuel_type'),
-            'transmission': specs.get('transmission'),
-            'body_type': specs.get('body_type'),
-            'doors': specs.get('doors'),
-            
-            # Additional API data (safely handle None values)
-            'dealer_review_rating': (api_vehicle.get('dealerReview') or {}).get('overallReviewRating'),
-            'dealer_review_count': (api_vehicle.get('dealerReview') or {}).get('numberOfReviews'),
-            'attention_grabber': api_vehicle.get('attentionGrabber'),
-            'distance': api_vehicle.get('formattedDistance'),
-            'number_of_images': api_vehicle.get('numberOfImages') or 0,
-            'has_video': api_vehicle.get('hasVideo') or False,
-            'has_360_spin': api_vehicle.get('has360Spin') or False,
-            'manufacturer_approved': api_vehicle.get('manufacturerApproved') or False,
-            
-            # Image URLs (processed by network scraper)
-            'image_url': api_vehicle.get('image_url', ''),
-            'image_url_2': api_vehicle.get('image_url_2', '')
-        }
-        
-        return analyzer_vehicle
-    
-    @staticmethod
-    def _extract_specs_from_title(title: str) -> Dict[str, Optional[str]]:
-        """
-        Extract vehicle specifications from title/subtitle text.
-        
-        Args:
-            title: Combined title and subtitle text
-            
-        Returns:
-            Dict with extracted specs
-        """
-        title_lower = title.lower()
-        specs = {}
-        
-        # Extract engine size (1.0, 1.2L, 2.0 TDI, etc.)
-        engine_patterns = [
-            r'(\d+\.\d+)l?\s*(?:litre|liter)?',
-            r'(\d+)l\s',
-            r'(\d+\.\d+)\s*(?:tdi|vvt|turbo)',
-        ]
-        
-        for pattern in engine_patterns:
-            match = re.search(pattern, title_lower)
-            if match:
-                try:
-                    specs['engine_size'] = float(match.group(1))
-                    break
-                except (ValueError, IndexError):
-                    pass
-        
-        # Extract fuel type
-        fuel_keywords = {
-            'petrol': 'Petrol',
-            'diesel': 'Diesel', 
-            'hybrid': 'Hybrid',
-            'electric': 'Electric',
-            'plugin': 'Plug-in Hybrid',
-            'plug-in': 'Plug-in Hybrid',
-            'tdi': 'Diesel',
-            'hdi': 'Diesel',
-            'cdti': 'Diesel',
-        }
-        
-        for keyword, fuel_type in fuel_keywords.items():
-            if keyword in title_lower:
-                specs['fuel_type'] = fuel_type
-                break
-        
-        # Extract transmission
-        transmission_keywords = {
-            'manual': 'Manual',
-            'automatic': 'Automatic',
-            'auto': 'Automatic',
-            'cvt': 'CVT',
-            'semi-automatic': 'Semi-Automatic',
-            'semi auto': 'Semi-Automatic',
-            'tiptronic': 'Automatic',
-            'dsg': 'Automatic',
-        }
-        
-        for keyword, trans_type in transmission_keywords.items():
-            if keyword in title_lower:
-                specs['transmission'] = trans_type
-                break
-        
-        # Extract body type
-        body_keywords = {
-            'hatchback': 'Hatchback',
-            'saloon': 'Saloon',
-            'estate': 'Estate',
-            'coupe': 'Coupe',
-            'convertible': 'Convertible',
-            'suv': 'SUV',
-            'mpv': 'MPV',
-            '4x4': 'SUV',
-            'crossover': 'SUV',
-        }
-        
-        for keyword, body_type in body_keywords.items():
-            if keyword in title_lower:
-                specs['body_type'] = body_type
-                break
-        
-        # Extract number of doors
-        door_patterns = [
-            r'(\d)\s*dr\b',
-            r'(\d)\s*door',
-            r'(\d)\s*-door',
-        ]
-        
-        for pattern in door_patterns:
-            match = re.search(pattern, title_lower)
-            if match:
-                try:
-                    specs['doors'] = int(match.group(1))
-                    break
-                except (ValueError, IndexError):
-                    pass
-        
-        return specs
+        except Exception as e:
+            raise ValueError(f"Error processing vehicle {advert_id}: {str(e)}")
     
     @staticmethod
     def convert_vehicle_list(api_vehicles: List[Dict]) -> List[Dict]:
@@ -352,14 +180,22 @@ def test_data_adapter():
     """Test the data adapter with real API data"""
     print("🧪 Testing Network Data Adapter...")
     
-    from networkrequest_scraper import AutoTraderAPIClient
+    from network_scraper import AutoTraderAPIClient
     
-    # Get some test data
+    # Get some test data (raw API format)
     client = AutoTraderAPIClient()
-    api_vehicles = client.get_all_cars("Toyota", "AYGO", max_pages=1)
+    raw_api_data = client.search_cars("Toyota", "AYGO", page=1)
+    
+    if not raw_api_data:
+        print("❌ No test data available")
+        return
+    
+    # Extract listings from response
+    search_results = raw_api_data[0].get('data', {}).get('searchResults', {})
+    api_vehicles = search_results.get('listings', [])
     
     if not api_vehicles:
-        print("❌ No test data available")
+        print("❌ No vehicles in API response")
         return
     
     print(f"📊 Testing with {len(api_vehicles)} API vehicles")
@@ -375,7 +211,8 @@ def test_data_adapter():
         
         # Show key fields
         key_fields = ['url', 'title', 'price_numeric', 'year', 'mileage', 
-                     'seller_type', 'engine_size', 'fuel_type', 'transmission']
+                     'seller_type', 'engine_size', 'fuel_type', 'transmission',
+                     'image_url', 'image_url_2']
         
         for field in key_fields:
             value = sample.get(field, 'N/A')

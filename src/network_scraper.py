@@ -348,8 +348,8 @@ def convert_api_car_to_deal(car_data: Dict) -> Dict:
             if mileage_match:
                 mileage = int(mileage_match.group(1).replace(',', ''))
         
-        # Extract vehicle specifications from subtitle
-        vehicle_specs = extract_vehicle_specs(subtitle)
+        # Extract vehicle specifications from subtitle with enhanced fallback logic
+        vehicle_specs = extract_vehicle_specs(subtitle, car_data.get('title', ''))
         
         # Store processed data for easy access
         deal['processed'] = {
@@ -400,7 +400,7 @@ def convert_api_car_to_deal(car_data: Dict) -> Dict:
             'advertiser_type': advert_context.get('advertiserType') if advert_context else None,
             'vehicle_category': advert_context.get('vehicleCategory') if advert_context else None,
             
-            # Vehicle specifications extracted from subtitle
+            # Vehicle specifications extracted from subtitle (with enhanced fallback)
             'engine_size': vehicle_specs.get('engine_size'),
             'fuel_type': vehicle_specs.get('fuel_type'),
             'transmission': vehicle_specs.get('transmission'),
@@ -417,13 +417,16 @@ def convert_api_car_to_deal(car_data: Dict) -> Dict:
         print(f"Error converting car data: {e}")
         return {'raw_data': car_data, 'error': str(e), 'processed': {}}
 
-def extract_vehicle_specs(subtitle: str) -> dict:
+def extract_vehicle_specs(subtitle: str, title: str = '') -> dict:
     """
-    Extract vehicle specifications from the subtitle
-    Examples:
-    - "1.4 16V SE Copa Sport Coupe Euro 5 3dr" 
-    - "1.0 TSI SE Euro 6 (s/s) 5dr"
-    - "1.2 TDI Ecomotive CR SE Euro 5 (s/s) 5dr"
+    Extract vehicle specifications from the subtitle and title with enhanced fallback logic.
+    
+    Args:
+        subtitle: Vehicle subtitle from API
+        title: Vehicle title from API (fallback source)
+        
+    Returns:
+        Dict containing extracted specifications
     """
     specs = {
         'engine_size': None,
@@ -436,72 +439,106 @@ def extract_vehicle_specs(subtitle: str) -> dict:
         'stop_start': False
     }
     
-    if not subtitle:
+    # Combine subtitle and title for more comprehensive extraction
+    full_text = f"{subtitle} {title}".strip()
+    
+    if not full_text:
         return specs
     
     import re
-    subtitle_lower = subtitle.lower()
+    text_lower = full_text.lower()
     
     # Engine size (e.g., "1.4", "2.0", "1.0")
     engine_match = re.search(r'(\d+\.\d+)', subtitle)
     if engine_match:
         specs['engine_size'] = float(engine_match.group(1))
     
-    # Fuel type detection
-    if 'tdi' in subtitle_lower or 'diesel' in subtitle_lower:
-        specs['fuel_type'] = 'Diesel'
-    elif 'tsi' in subtitle_lower or 'petrol' in subtitle_lower or 'tfsi' in subtitle_lower:
-        specs['fuel_type'] = 'Petrol'
-    elif 'hybrid' in subtitle_lower:
-        specs['fuel_type'] = 'Hybrid'
-    elif 'electric' in subtitle_lower or 'ev' in subtitle_lower:
-        specs['fuel_type'] = 'Electric'
-    else:
-        # Default for common patterns
-        if any(x in subtitle_lower for x in ['16v', 'tsi', 'fsi']):
+    # Enhanced fuel type detection with better fallback patterns
+    fuel_patterns = {
+        # Direct fuel indicators
+        'diesel': ['diesel', 'tdi', 'hdi', 'cdti', 'dti', 'crdi', 'bluetec', 'biturbo diesel'],
+        'petrol': ['petrol', 'tsi', 'tfsi', 'fsi', 'vvt', 'vtech', 'turbo petrol', '16v'],
+        'hybrid': ['hybrid', 'plugin hybrid', 'plug-in hybrid', 'self-charging hybrid'],
+        'electric': ['electric', 'ev', 'bev', 'pure electric', 'zero emission'],
+    }
+    
+    for fuel_type, patterns in fuel_patterns.items():
+        for pattern in patterns:
+            if pattern in text_lower:
+                specs['fuel_type'] = fuel_type.capitalize()
+                break
+        if specs['fuel_type']:
+            break
+    
+    # If no fuel type found, try common model-specific patterns
+    if not specs['fuel_type']:
+        # Common diesel model suffixes
+        diesel_patterns = ['116d', '118d', '120d', '318d', '320d', '520d', '116d', '118d']
+        for pattern in diesel_patterns:
+            if pattern in text_lower:
+                specs['fuel_type'] = 'Diesel'
+                break
+        
+        # If still no fuel type and contains common petrol indicators
+        if not specs['fuel_type'] and any(x in text_lower for x in ['16v', 'tsi', 'fsi', 'vvt']):
             specs['fuel_type'] = 'Petrol'
     
-    # Transmission detection
-    if 'dsg' in subtitle_lower or 'auto' in subtitle_lower or 'automatic' in subtitle_lower:
-        specs['transmission'] = 'Automatic'
-    elif 'manual' in subtitle_lower or 'man' in subtitle_lower:
-        specs['transmission'] = 'Manual'
-    else:
-        # Most cars are manual unless specified
+    # Enhanced transmission detection
+    transmission_patterns = {
+        'automatic': ['automatic', 'auto', 'dsg', 'tiptronic', 's-tronic', 'cvt', 'powershift', 'edc'],
+        'manual': ['manual', 'man', 'stick shift', '6-speed manual', '5-speed manual'],
+    }
+    
+    for trans_type, patterns in transmission_patterns.items():
+        for pattern in patterns:
+            if pattern in text_lower:
+                specs['transmission'] = trans_type.capitalize()
+                break
+        if specs['transmission']:
+            break
+    
+    # Default to manual if no transmission specified (most common)
+    if not specs['transmission']:
         specs['transmission'] = 'Manual'
     
     # Doors (e.g., "3dr", "5dr")
-    doors_match = re.search(r'(\d+)dr', subtitle_lower)
+    doors_match = re.search(r'(\d+)dr', text_lower)
     if doors_match:
         specs['doors'] = int(doors_match.group(1))
     
     # Euro standard (e.g., "Euro 5", "Euro 6")
-    euro_match = re.search(r'euro (\d+)', subtitle_lower)
+    euro_match = re.search(r'euro (\d+)', text_lower)
     if euro_match:
         specs['euro_standard'] = f"Euro {euro_match.group(1)}"
     
     # Stop/Start technology
-    if '(s/s)' in subtitle_lower or 'start/stop' in subtitle_lower:
+    if '(s/s)' in text_lower or 'start/stop' in text_lower:
         specs['stop_start'] = True
     
     # Body type detection
-    if 'coupe' in subtitle_lower:
-        specs['body_type'] = 'Coupe'
-    elif 'estate' in subtitle_lower or 'st' in subtitle_lower:
-        specs['body_type'] = 'Estate'
-    elif 'hatchback' in subtitle_lower:
-        specs['body_type'] = 'Hatchback'
-    elif 'saloon' in subtitle_lower or 'sedan' in subtitle_lower:
-        specs['body_type'] = 'Saloon'
-    elif 'suv' in subtitle_lower:
-        specs['body_type'] = 'SUV'
-    elif 'convertible' in subtitle_lower or 'cabriolet' in subtitle_lower:
-        specs['body_type'] = 'Convertible'
+    body_patterns = {
+        'coupe': ['coupe', 'coup'],
+        'estate': ['estate', 'touring', 'avant', 'variant', 'sw'],
+        'hatchback': ['hatchback', 'hatch'],
+        'saloon': ['saloon', 'sedan', 'limousine'],
+        'suv': ['suv', '4x4', 'crossover', 'x-drive', 'quattro'],
+        'convertible': ['convertible', 'cabriolet', 'cabrio', 'roadster'],
+        'mpv': ['mpv', 'people carrier', 'tourer'],
+    }
+    
+    for body_type, patterns in body_patterns.items():
+        for pattern in patterns:
+            if pattern in text_lower:
+                specs['body_type'] = body_type.capitalize()
+                break
+        if specs['body_type']:
+            break
     
     # Trim level (extract common trim names)
-    trim_patterns = ['se', 'sport', 'fr', 'toca', 'style', 'reference', 'copa', 'ecomotive', 'xcellence']
+    trim_patterns = ['se', 'sport', 'fr', 'toca', 'style', 'reference', 'copa', 'ecomotive', 'xcellence', 
+                    'comfort', 'elegance', 'luxury', 'premium', 'gt', 'gti', 'rs', 'amg', 'm sport']
     for trim in trim_patterns:
-        if trim in subtitle_lower:
+        if trim in text_lower:
             specs['trim_level'] = trim.upper()
             break
     
@@ -552,84 +589,19 @@ def test_api_scraping():
         print(f"📍 Location: {p.get('location', 'N/A')} ({p.get('distance', 'N/A')})")
         print(f"🔗 URL: {p.get('url', 'N/A')}")
         
-        # Listing details
-        print(f"\n📋 Listing Details:")
-        print(f"   Type: {p.get('listing_type', 'N/A')}")
-        print(f"   Subtitle: {p.get('subtitle', 'N/A')}")
-        print(f"   Attention: {p.get('attention_grabber', 'N/A')}")
-        print(f"   Description: {p.get('description', 'N/A')}")
-        
-        # Seller info
-        print(f"\n🏪 Seller:")
-        print(f"   Name: {p.get('seller_name', 'N/A')}")
-        print(f"   Type: {p.get('seller_type', 'N/A')}")
-        print(f"   Rating: {p.get('dealer_rating', 'N/A')}/5 ({p.get('dealer_review_count', 0)} reviews)")
-        
-        # Vehicle condition & features
-        print(f"\n🔧 Vehicle Info:")
-        print(f"   Condition: {p.get('condition', 'N/A')}")
+        # Vehicle specifications
+        print(f"\n🔧 Vehicle Specs:")
         print(f"   Engine: {p.get('engine_size', 'N/A')}L {p.get('fuel_type', 'N/A')}")
         print(f"   Transmission: {p.get('transmission', 'N/A')}")
-        print(f"   Doors: {p.get('doors', 'N/A')}")
         print(f"   Body Type: {p.get('body_type', 'N/A')}")
-        print(f"   Trim: {p.get('trim_level', 'N/A')}")
-        print(f"   Euro Standard: {p.get('euro_standard', 'N/A')}")
-        print(f"   Stop/Start: {p.get('stop_start', False)}")
-        print(f"   Price Rating: {p.get('price_indicator_rating', 'N/A')}")
-        print(f"   RRP: {p.get('rrp', 'N/A')}")
-        print(f"   Discount: {p.get('discount', 'N/A')}")
-        print(f"   Pre-reg: {p.get('pre_reg', False)}")
-        print(f"   Manufacturer Approved: {p.get('manufacturer_approved', False)}")
+        print(f"   Doors: {p.get('doors', 'N/A')}")
         
-        # Media & features
-        print(f"\n📸 Media:")
-        print(f"   Images: {p.get('image_count', 0)}")
-        print(f"   Has Video: {p.get('has_video', False)}")
-        print(f"   Has 360° Spin: {p.get('has_360_spin', False)}")
-        print(f"   Digital Retailing: {p.get('has_digital_retailing', False)}")
+        # Images
+        print(f"\n📸 Images:")
+        print(f"   Primary: {p.get('image_url', 'N/A')}")
+        print(f"   Secondary: {p.get('image_url_2', 'N/A')}")
+        print(f"   Count: {p.get('image_count', 0)}")
         
-        # Badges
-        print(f"\n🏷️  Badges: {', '.join(p.get('badges', []))}")
-        
-        # Finance info
-        finance = p.get('finance_info')
-        if finance:
-            print(f"\n💳 Finance Available:")
-            if finance.get('monthlyPrice'):
-                print(f"   Monthly: {finance['monthlyPrice'].get('priceFormattedAndRounded', 'N/A')}")
-            print(f"   Quote Type: {finance.get('quoteSubType', 'N/A')}")
-        
-        # Raw data sample (first few keys)
-        print(f"\n📊 Raw Data Keys Available:")
-        raw_keys = list(deal.get('raw_data', {}).keys()) if deal.get('raw_data') else []
-        print(f"   {', '.join(raw_keys[:10])}{'...' if len(raw_keys) > 10 else ''}")
-        
-    print(f"\n{'='*50}")
-    print(f"📈 SUMMARY:")
-    print(f"   Total vehicles: {len(deals)}")
-    print(f"   Successfully processed: {len([d for d in deals if d and 'processed' in d])}")
-    print(f"   Errors: {len([d for d in deals if d and 'error' in d])}")
-    
-    # Show unique listing types
-    listing_types = set()
-    seller_types = set()
-    price_ratings = set()
-    
-    for deal in deals:
-        if deal and 'processed' in deal:
-            p = deal['processed']
-            if p.get('listing_type'):
-                listing_types.add(p['listing_type'])
-            if p.get('seller_type'):
-                seller_types.add(p['seller_type'])
-            if p.get('price_indicator_rating'):
-                price_ratings.add(p['price_indicator_rating'])
-    
-    print(f"\n🔍 Data Analysis:")
-    print(f"   Listing Types: {', '.join(sorted(listing_types))}")
-    print(f"   Seller Types: {', '.join(sorted(seller_types))}")
-    print(f"   Price Ratings: {', '.join(sorted(price_ratings))}")
-    
     return deals
 
 if __name__ == "__main__":
