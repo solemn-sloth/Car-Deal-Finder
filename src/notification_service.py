@@ -145,7 +145,7 @@ class NotificationService:
             
             <!-- Footer -->
             <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center; color: #6b7280; font-size: 14px;">
-                <p>Happy dealing! 🎯</p>
+                <p>Happy trading! 🎯</p>
                 <p>
                     <a href="https://cardealerbot.co.uk" style="color: #2563eb; text-decoration: none;">Visit Dashboard</a> | 
                     <a href="https://cardealerbot.co.uk/preferences" style="color: #2563eb; text-decoration: none;">Update Preferences</a>

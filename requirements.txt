@@ -20,5 +20,5 @@ lxml>=4.9.0
 httpx>=0.24.0
 pydantic>=2.0.0
 
-# Payment processing
-stripe>=5.0.0
+# Machine Learning
+scikit-learn>=1.0.0
