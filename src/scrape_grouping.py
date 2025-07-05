@@ -33,7 +33,7 @@ class ScrapingResult:
     """Results from scraping a make/model group"""
     group: ConfigurationGroup
     raw_vehicles: List[Dict]
-    processed_variants: Dict[str, List[Dict]]  # variant_key -> analyzed vehicles
+    processed_variants: Dict[str, Dict]  # variant_key -> variant data dict
     total_deals: int
     quality_deals: int
     errors: List[str]
@@ -228,6 +228,13 @@ class SmartGroupingOrchestrator:
                         # Filter for quality deals after analysis
                         quality_deals = [deal for deal in variant_vehicles if enhanced_keep_listing(deal)]
                         
+                        # Ensure processed_variants remains a dictionary
+                        if not isinstance(processed_variants, dict):
+                            error_msg = f"Data corruption detected: processed_variants became {type(processed_variants)} for {group.make} {group.model}"
+                            print(f"❌ {error_msg}")
+                            errors.append(error_msg)
+                            processed_variants = {}  # Reset to dictionary
+                        
                         processed_variants[config['variant_key']] = {
                             'config': config,
                             'total_vehicles': len(variant_vehicles),
@@ -239,11 +246,40 @@ class SmartGroupingOrchestrator:
                         total_quality_deals += len(quality_deals)
                         
                         print(f"  📊 {config['variant_name']}: {len(variant_vehicles)} vehicles → {len(quality_deals)} quality deals")
+                    else:
+                        # Even if no vehicles, still add the variant to maintain consistency
+                        processed_variants[config['variant_key']] = {
+                            'config': config,
+                            'total_vehicles': 0,
+                            'analyzed_deals': [],
+                            'quality_deals': [],
+                            'quality_count': 0
+                        }
                     
                 except Exception as e:
                     error_msg = f"Error processing variant {config['variant_name']}: {str(e)}"
                     errors.append(error_msg)
                     print(f"  ❌ {error_msg}")
+                    
+                    # Even on error, ensure we maintain a dictionary structure
+                    if not isinstance(processed_variants, dict):
+                        processed_variants = {}
+                    
+                    # Add empty variant data to maintain consistency
+                    processed_variants[config['variant_key']] = {
+                        'config': config,
+                        'total_vehicles': 0,
+                        'analyzed_deals': [],
+                        'quality_deals': [],
+                        'quality_count': 0
+                    }
+            
+            # Final validation before returning
+            if not isinstance(processed_variants, dict):
+                error_msg = f"Critical data corruption: processed_variants is {type(processed_variants)} instead of dict for {group.make} {group.model}"
+                print(f"❌ {error_msg}")
+                errors.append(error_msg)
+                processed_variants = {}  # Reset to empty dict as fallback
             
             self.session_data['total_quality_deals'] += total_quality_deals
             
@@ -432,12 +468,30 @@ class SmartGroupingOrchestrator:
                     'total_vehicles': result.total_deals
                 })
             
-            # Track variant performance
+            # Track variant performance with defensive programming
+            # Ensure processed_variants is always a dictionary
+            if not isinstance(result.processed_variants, dict):
+                error_msg = f"Data corruption detected: processed_variants is {type(result.processed_variants)} instead of dict for {result.group.make} {result.group.model}"
+                print(f"❌ {error_msg}")
+                summary['error_summary'].append(error_msg)
+                continue
+                
             for variant_key, variant_data in result.processed_variants.items():
+                # Ensure variant_data is a dictionary with expected keys
+                if not isinstance(variant_data, dict):
+                    error_msg = f"Data corruption detected: variant_data is {type(variant_data)} instead of dict for {result.group.make} {result.group.model} variant {variant_key}"
+                    print(f"❌ {error_msg}")
+                    summary['error_summary'].append(error_msg)
+                    continue
+                    
+                # Safely access variant data with defaults
+                quality_count = variant_data.get('quality_count', 0)
+                total_vehicles = variant_data.get('total_vehicles', 0)
+                
                 summary['variant_performance'][variant_key].append({
                     'group': f"{result.group.make} {result.group.model}",
-                    'quality_deals': variant_data['quality_count'],
-                    'total_vehicles': variant_data['total_vehicles']
+                    'quality_deals': quality_count,
+                    'total_vehicles': total_vehicles
                 })
         
         # Sort top performers

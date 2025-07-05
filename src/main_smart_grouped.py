@@ -3,9 +3,9 @@ Integration script to replace the existing scraping workflow with smart grouped 
 This replaces the slower Playwright-based approach with fast network requests and smart grouping.
 """
 
-from orchestrator_grouped import SmartGroupingOrchestrator
+from scrape_grouping import SmartGroupingOrchestrator
 from supabase_storage import SupabaseStorage
-from deal_notification_pipeline import DealNotificationPipeline
+from deal_notifications import DealNotificationPipeline
 import json
 from datetime import datetime
 import argparse
@@ -39,8 +39,23 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False):
         # Compile all quality deals
         all_quality_deals = []
         for result in results['results']:
+            # Defensive programming: ensure processed_variants is a dictionary
+            if not isinstance(result.processed_variants, dict):
+                print(f"❌ Data corruption detected: processed_variants is {type(result.processed_variants)} instead of dict for {result.group.make} {result.group.model}")
+                continue
+                
             for variant_key, variant_data in result.processed_variants.items():
-                all_quality_deals.extend(variant_data['quality_deals'])
+                # Defensive programming: ensure variant_data is a dictionary
+                if not isinstance(variant_data, dict):
+                    print(f"❌ Data corruption detected: variant_data is {type(variant_data)} instead of dict for variant {variant_key}")
+                    continue
+                    
+                # Safely access quality_deals with default
+                quality_deals = variant_data.get('quality_deals', [])
+                if isinstance(quality_deals, list):
+                    all_quality_deals.extend(quality_deals)
+                else:
+                    print(f"❌ Data corruption detected: quality_deals is {type(quality_deals)} instead of list for variant {variant_key}")
         
         print(f"\n📊 Scraping Results:")
         print(f"   • Groups processed: {results['session_data']['groups_processed']}")
