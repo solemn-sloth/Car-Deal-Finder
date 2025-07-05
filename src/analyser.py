@@ -96,7 +96,9 @@ def calculate_dynamic_category_ratio(vehicle: dict, all_vehicles: List[dict], ca
     Returns:
         Market-based ratio representing the premium/discount for this category
     """
-    vehicle_category = vehicle.get(category_field, '').strip().lower()
+    # Handle None values gracefully
+    vehicle_category_raw = vehicle.get(category_field, '')
+    vehicle_category = (vehicle_category_raw or '').strip().lower()
     vehicle_make = vehicle.get('make', '').lower()
     vehicle_model = vehicle.get('model', '').lower()
     
@@ -121,7 +123,7 @@ def calculate_dynamic_category_ratio(vehicle: dict, all_vehicles: List[dict], ca
     # Get vehicles with the same category value
     same_category_vehicles = [
         v for v in same_make_model 
-        if v.get(category_field, '').strip().lower() == vehicle_category
+        if (v.get(category_field, '') or '').strip().lower() == vehicle_category
     ]
     
     if len(same_category_vehicles) < 1:  # Need at least 1 sample

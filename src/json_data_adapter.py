@@ -13,6 +13,30 @@ class NetworkDataAdapter:
     """
     
     @staticmethod
+    def _extract_fuel_type_from_title(title: str, subtitle: str) -> str:
+        """Extract fuel type from title/subtitle when API field is missing"""
+        full_text = f"{title} {subtitle}".strip()
+        
+        fuel_keywords = {
+            'plug-in hybrid': 'Plug-in Hybrid',
+            'plugin hybrid': 'Plug-in Hybrid',
+            'plug in hybrid': 'Plug-in Hybrid',
+            'phev': 'Plug-in Hybrid',
+            'electric': 'Electric',
+            'hybrid': 'Hybrid',  # This should come after plug-in variations
+            'diesel': 'Diesel',
+            'petrol': 'Petrol'
+        }
+        
+        text_lower = full_text.lower()
+        # Check in order of specificity (most specific first)
+        for keyword, fuel_type in fuel_keywords.items():
+            if keyword in text_lower:
+                return fuel_type
+        
+        return ''  # Return empty string instead of 'Unknown' to allow analyzer to skip analysis
+    
+    @staticmethod
     def convert_vehicle(api_vehicle: Dict) -> Dict:
         """
         Convert a single vehicle from API format to analyzer format.
@@ -49,13 +73,26 @@ class NetworkDataAdapter:
             
             processed_data = converted_deal['processed']
             
+            # Handle None values for critical fields and apply fallback logic
+            title = processed_data.get('title', '') or ''
+            subtitle = processed_data.get('subtitle', '') or ''
+            
+            # Extract fuel type with fallback logic
+            fuel_type = processed_data.get('fuel_type')
+            if fuel_type is None or fuel_type == '':
+                fuel_type = NetworkDataAdapter._extract_fuel_type_from_title(title, subtitle)
+            
+            # Handle None values for other fields
+            body_type = processed_data.get('body_type') or ''
+            transmission = processed_data.get('transmission') or ''
+            
             # Map the processed data to analyzer-compatible format
             analyzer_vehicle = {
                 # Core fields (directly mapped)
                 'url': processed_data.get('url', ''),
-                'title': processed_data.get('title', ''),
-                'subtitle': processed_data.get('subtitle', ''),
-                'full_title': f"{processed_data.get('title', '')} {processed_data.get('subtitle', '')}".strip(),
+                'title': title,
+                'subtitle': subtitle,
+                'full_title': f"{title} {subtitle}".strip(),
                 'price': processed_data.get('price_raw', ''),
                 'price_numeric': processed_data.get('price', 0),
                 'year': processed_data.get('year', 0),
@@ -64,13 +101,13 @@ class NetworkDataAdapter:
                 'seller_type': 'dealer' if processed_data.get('seller_type') == 'TRADE' else 'private',
                 'seller_name': processed_data.get('seller_name', ''),
                 
-                # Vehicle specifications (with fallback logic already applied)
+                # Vehicle specifications (with fallback logic and None handling)
                 'make': processed_data.get('make', ''),
                 'model': processed_data.get('model', ''),
                 'engine_size': processed_data.get('engine_size'),
-                'fuel_type': processed_data.get('fuel_type'),
-                'transmission': processed_data.get('transmission'),
-                'body_type': processed_data.get('body_type'),
+                'fuel_type': fuel_type,
+                'transmission': transmission,
+                'body_type': body_type,
                 'doors': processed_data.get('doors'),
                 
                 # Additional fields
