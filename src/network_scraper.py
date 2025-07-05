@@ -308,11 +308,22 @@ def convert_api_car_to_deal(car_data: Dict) -> Dict:
         else:
             deal_url = ""
         
-        # Extract price
-        price_str = car_data.get('price', '').replace('£', '').replace(',', '') if car_data.get('price') else ''
-        try:
-            price = int(price_str) if price_str.isdigit() else 0
-        except:
+        # Extract price - handle both string and integer values
+        price_value = car_data.get('price')
+        if price_value is not None:
+            if isinstance(price_value, (int, float)):
+                # Price is already a number
+                price = int(price_value)
+            elif isinstance(price_value, str):
+                # Price is a string, clean it
+                price_str = price_value.replace('£', '').replace(',', '').strip()
+                try:
+                    price = int(price_str) if price_str.isdigit() else 0
+                except ValueError:
+                    price = 0
+            else:
+                price = 0
+        else:
             price = 0
         
         # Extract year from title or tracking context

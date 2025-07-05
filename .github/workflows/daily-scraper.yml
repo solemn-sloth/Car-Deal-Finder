@@ -23,4 +23,4 @@ jobs:
           pip3 install -r requirements.txt
       
       - name: Run scraper
-        run: python3 scraper.py
+        run: python3 src/scraper.py

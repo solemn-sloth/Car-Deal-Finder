@@ -1,39 +1,45 @@
 """
-Smart Configuration Grouping Orchestrator for AutoTrader scraper.
-Groups vehicle configurations by make/model to minimize API calls and optimize analysis.
+Smart Configuration Grouping for Car Deal Scraper
+
+This module implements intelligent grouping of vehicle configurations to minimize API calls
+while maintaining comprehensive analysis coverage.
 """
+
 import time
 import random
-from typing import Dict, List, Tuple, Optional, Set
-from dataclasses import dataclass
-from collections import defaultdict
-import json
 from datetime import datetime
+from typing import Dict, List, Optional, NamedTuple
+from dataclasses import dataclass
 
-from config import TARGET_VEHICLES_BY_MAKE, VEHICLE_SEARCH_CRITERIA
 from network_scraper import AutoTraderAPIClient
 from json_data_adapter import NetworkDataAdapter
 from analyser import enhanced_analyse_listings, enhanced_keep_listing
+from collections import defaultdict
+from config import TARGET_VEHICLES_BY_MAKE, VEHICLE_SEARCH_CRITERIA
 
 
 @dataclass
 class ConfigurationGroup:
-    """Represents a group of configurations for the same make/model"""
+    """
+    Represents a group of related vehicle configurations that can share one API call.
+    """
     make: str
     model: str
     search_criteria: Dict
-    specific_configs: List[Dict]  # Different fuel/transmission combinations for this make/model
+    specific_configs: List[Dict]
     
-    def __repr__(self):
-        return f"ConfigurationGroup({self.make} {self.model}, {len(self.specific_configs)} variants)"
+    def __str__(self):
+        return f"{self.make} {self.model} ({len(self.specific_configs)} variants)"
 
 
 @dataclass
 class ScrapingResult:
-    """Results from scraping a make/model group"""
+    """
+    Results from scraping a single configuration group.
+    """
     group: ConfigurationGroup
     raw_vehicles: List[Dict]
-    processed_variants: Dict[str, List[Dict]]  # variant_key -> analyzed vehicles
+    processed_variants: Dict  # This MUST be a Dict, not a List
     total_deals: int
     quality_deals: int
     errors: List[str]
@@ -177,7 +183,7 @@ class SmartGroupingOrchestrator:
                 return ScrapingResult(
                     group=group,
                     raw_vehicles=[],
-                    processed_variants={},
+                    processed_variants={},  # ALWAYS return a dict
                     total_deals=0,
                     quality_deals=0,
                     errors=["No vehicles found"]
@@ -192,7 +198,7 @@ class SmartGroupingOrchestrator:
                     return ScrapingResult(
                         group=group,
                         raw_vehicles=raw_vehicles,
-                        processed_variants={},
+                        processed_variants={},  # ALWAYS return a dict
                         total_deals=len(raw_vehicles),
                         quality_deals=0,
                         errors=["No vehicles could be converted to analyzer format"]
@@ -206,14 +212,14 @@ class SmartGroupingOrchestrator:
                 return ScrapingResult(
                     group=group,
                     raw_vehicles=raw_vehicles,
-                    processed_variants={},
+                    processed_variants={},  # ALWAYS return a dict
                     total_deals=len(raw_vehicles),
                     quality_deals=0,
                     errors=errors
                 )
             
             # Process each configuration variant against the shared vehicle data
-            processed_variants = {}
+            processed_variants = {}  # Initialize as empty dict
             total_quality_deals = 0
             
             for config in group.specific_configs:
@@ -250,7 +256,7 @@ class SmartGroupingOrchestrator:
             return ScrapingResult(
                 group=group,
                 raw_vehicles=raw_vehicles,
-                processed_variants=processed_variants,
+                processed_variants=processed_variants,  # This is guaranteed to be a dict
                 total_deals=len(raw_vehicles),
                 quality_deals=total_quality_deals,
                 errors=errors
@@ -264,7 +270,7 @@ class SmartGroupingOrchestrator:
             return ScrapingResult(
                 group=group,
                 raw_vehicles=[],
-                processed_variants={},
+                processed_variants={},  # ALWAYS return a dict, even on error
                 total_deals=0,
                 quality_deals=0,
                 errors=errors
@@ -340,6 +346,23 @@ class SmartGroupingOrchestrator:
         
         return 'Unknown'
     
+    def _compile_session_summary(self, results: List[ScrapingResult]) -> Dict:
+        """
+        Compile a comprehensive session summary.
+        """
+        summary = {
+            'total_groups': len(results),
+            'successful_groups': len([r for r in results if not r.errors]),
+            'failed_groups': len([r for r in results if r.errors]),
+            'total_raw_vehicles': sum(len(r.raw_vehicles) for r in results),
+            'total_quality_deals': sum(r.quality_deals for r in results),
+            'api_calls_made': self.session_data['total_api_calls'],
+            'api_calls_saved': self.session_data['api_call_savings'],
+            'efficiency_improvement': f"{self.session_data['api_call_savings']/max(1, self.session_data['total_api_calls'])*100:.1f}%"
+        }
+        
+        return summary
+    
     def run_full_orchestration(self, max_groups: Optional[int] = None) -> Dict:
         """
         Run the complete orchestration process for all or limited groups.
@@ -406,6 +429,27 @@ class SmartGroupingOrchestrator:
             'results': results,
             'summary': session_summary
         }
+        
+        # Compile final results
+        self.session_data['end_time'] = datetime.now().isoformat()
+        self.session_data['total_runtime_minutes'] = (time.time() - start_time) / 60
+        
+        session_summary = self._compile_session_summary(results)
+        
+        print(f"\n🎯 Orchestration Complete!")
+        print(f"📊 Session Summary:")
+        print(f"   • Groups processed: {self.session_data['groups_processed']}")
+        print(f"   • Total API calls: {self.session_data['total_api_calls']}")
+        print(f"   • API calls saved: {self.session_data['api_call_savings']}")
+        print(f"   • Total vehicles: {self.session_data['total_vehicles_scraped']}")
+        print(f"   • Quality deals: {self.session_data['total_quality_deals']}")
+        print(f"   • Runtime: {self.session_data['total_runtime_minutes']:.1f} minutes")
+        
+        return {
+            'session_data': self.session_data,
+            'results': results,
+            'summary': session_summary
+        }
     
     def _compile_session_summary(self, results: List[ScrapingResult]) -> Dict:
         """Compile detailed session summary from all results"""
@@ -430,14 +474,6 @@ class SmartGroupingOrchestrator:
                     'group': f"{result.group.make} {result.group.model}",
                     'quality_deals': result.quality_deals,
                     'total_vehicles': result.total_deals
-                })
-            
-            # Track variant performance
-            for variant_key, variant_data in result.processed_variants.items():
-                summary['variant_performance'][variant_key].append({
-                    'group': f"{result.group.make} {result.group.model}",
-                    'quality_deals': variant_data['quality_count'],
-                    'total_vehicles': variant_data['total_vehicles']
                 })
         
         # Sort top performers
