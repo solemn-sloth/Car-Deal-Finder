@@ -9,10 +9,17 @@ from typing import Dict, List, Any, Optional
 # Load environment variables
 load_dotenv()
 
-def normalize_autotrader_url(url: str) -> str:
+def normalize_autotrader_url(url: str, mileage: int = None) -> str:
     """
     Normalize AutoTrader URL by ensuring the search parameters are preserved.
     This maintains the 'return to search results' functionality for users.
+    
+    Args:
+        url (str): The AutoTrader URL to normalize
+        mileage (int, optional): The vehicle mileage to use for calculating maximum-mileage parameter
+        
+    Returns:
+        str: Normalized URL with appropriate maximum-mileage parameter
     """
     try:
         # For AutoTrader URLs, ensure we're keeping all search parameters
@@ -20,6 +27,7 @@ def normalize_autotrader_url(url: str) -> str:
             # Clean up any unnecessary tracking parameters if needed
             # but preserve search-related parameters
             from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            import math
             
             # Parse the URL
             parsed_url = urlparse(url)
@@ -34,6 +42,12 @@ def normalize_autotrader_url(url: str) -> str:
             # Filter to keep only search-related parameters
             # Note: We're keeping ALL parameters to ensure search functionality works
             filtered_params = query_params
+            
+            # Calculate and set maximum-mileage parameter based on actual mileage
+            if mileage is not None and mileage > 0:
+                # Round up to nearest 10,000
+                max_mileage = math.ceil(mileage / 10000) * 10000
+                filtered_params['maximum-mileage'] = [str(max_mileage)]
             
             # Reconstruct the URL with preserved parameters
             new_query = urlencode(filtered_params, doseq=True)
@@ -758,7 +772,8 @@ class SupabaseStorage:
             for deal in new_deals:
                 url = deal.get('url')
                 if url:
-                    normalized_url = normalize_autotrader_url(url)
+                    mileage = deal.get('mileage')
+                    normalized_url = normalize_autotrader_url(url, mileage)
                     new_deal_urls.add(normalized_url)
                     deals_by_url[normalized_url] = deal
             
@@ -766,7 +781,7 @@ class SupabaseStorage:
             
             # Get all existing URLs from database
             existing_response = service_client.table(self.table_name)\
-                .select('url, id')\
+                .select('url, id, mileage')\
                 .execute()
             
             existing_urls = set()
@@ -776,7 +791,8 @@ class SupabaseStorage:
                 for row in existing_response.data:
                     url = row.get('url')
                     if url:
-                        normalized_url = normalize_autotrader_url(url)
+                        mileage = row.get('mileage')
+                        normalized_url = normalize_autotrader_url(url, mileage)
                         existing_urls.add(normalized_url)
                         existing_url_to_id[normalized_url] = row['id']
             
