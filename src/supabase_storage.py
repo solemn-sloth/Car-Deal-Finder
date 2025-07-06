@@ -9,10 +9,15 @@ from typing import Dict, List, Any, Optional
 # Load environment variables
 load_dotenv()
 
-def normalize_autotrader_url(url: str) -> str:
+def normalize_autotrader_url(url: str, mileage: int = None) -> str:
     """
     Normalize AutoTrader URL by ensuring the search parameters are preserved.
     This maintains the 'return to search results' functionality for users.
+    
+    Args:
+        url: The AutoTrader URL to normalize
+        mileage: The actual vehicle mileage (optional). If provided, the maximum-mileage
+                parameter will be updated to the correct value (rounded up to nearest 10,000)
     """
     try:
         # For AutoTrader URLs, ensure we're keeping all search parameters
@@ -29,11 +34,19 @@ def normalize_autotrader_url(url: str) -> str:
             search_params = ['advertising-location', 'page', 'sort', 'postcode', 
                              'radius', 'year-from', 'year-to', 'price-from', 
                              'price-to', 'include-delivery-option', 'body-type',
-                             'fuel-type', 'transmission', 'exclude-writeoff-categories']
+                             'fuel-type', 'transmission', 'exclude-writeoff-categories',
+                             'maximum-mileage', 'make', 'model', 'fromsra']
             
             # Filter to keep only search-related parameters
             # Note: We're keeping ALL parameters to ensure search functionality works
             filtered_params = query_params
+            
+            # Update maximum-mileage parameter if mileage is provided
+            if mileage is not None and mileage > 0:
+                # Calculate the correct maximum-mileage (round up to nearest 10,000)
+                max_mileage = ((mileage // 10000) + 1) * 10000
+                filtered_params['maximum-mileage'] = [str(max_mileage)]
+                print(f"🔧 Updated maximum-mileage: {mileage} miles -> {max_mileage} (rounded up)")
             
             # Reconstruct the URL with preserved parameters
             new_query = urlencode(filtered_params, doseq=True)
@@ -71,53 +84,53 @@ class SupabaseStorage:
         print(f"Supabase client initialized for table: {table_name}")
 
     def get_valid_columns(self):
-    """
-    Get a list of valid column names from the database schema
-    Uses caching to reduce database queries
-    """
-    if self._valid_columns is not None:
-        return self._valid_columns
-    
-    try:
-        # Query information_schema for column names
-        response = self.supabase.table('information_schema.columns')\
-            .select('column_name')\
-            .eq('table_name', self.table_name)\
-            .execute()
-        
-        if hasattr(response, 'data') and response.data:
-            self._valid_columns = [col['column_name'] for col in response.data]
-            print(f"✅ Retrieved {len(self._valid_columns)} valid columns for table '{self.table_name}'")
+        """
+        Get a list of valid column names from the database schema
+        Uses caching to reduce database queries
+        """
+        if self._valid_columns is not None:
             return self._valid_columns
         
-        print(f"⚠️ No columns found for table '{self.table_name}'")
-        return []
-    except Exception as e:
-        print(f"❌ Error getting valid columns: {e}")
-        # Fallback to an empty list if we can't get columns
-        return []
+        try:
+            # Query information_schema for column names
+            response = self.supabase.table('information_schema.columns')\
+                .select('column_name')\
+                .eq('table_name', self.table_name)\
+                .execute()
+            
+            if hasattr(response, 'data') and response.data:
+                self._valid_columns = [col['column_name'] for col in response.data]
+                print(f"✅ Retrieved {len(self._valid_columns)} valid columns for table '{self.table_name}'")
+                return self._valid_columns
+            
+            print(f"⚠️ No columns found for table '{self.table_name}'")
+            return []
+        except Exception as e:
+            print(f"❌ Error getting valid columns: {e}")
+            # Fallback to an empty list if we can't get columns
+            return []
 
-def filter_deal_fields(self, deal):
-    """
-    Filter deal object in-place to only include keys that exist as columns in the database
-    """
-    valid_columns = self.get_valid_columns()
-    if not valid_columns:
-        print("⚠️ No valid columns found. Proceeding with unfiltered data.")
-        return
-    
-    # Find keys to remove
-    keys_to_remove = [k for k in list(deal.keys()) if k not in valid_columns]
-    
-    # Remove invalid keys
-    for key in keys_to_remove:
-        deal.pop(key, None)
-    
-    # Log any fields that were filtered out
-    if keys_to_remove:
-        print(f"ℹ️ Filtered out non-existent columns: {', '.join(keys_to_remove)}")
-    
-    return filtered_data
+    def filter_deal_fields(self, deal):
+        """
+        Filter deal object in-place to only include keys that exist as columns in the database
+        """
+        valid_columns = self.get_valid_columns()
+        if not valid_columns:
+            print("⚠️ No valid columns found. Proceeding with unfiltered data.")
+            return
+        
+        # Find keys to remove
+        keys_to_remove = [k for k in list(deal.keys()) if k not in valid_columns]
+        
+        # Remove invalid keys
+        for key in keys_to_remove:
+            deal.pop(key, None)
+        
+        # Log any fields that were filtered out
+        if keys_to_remove:
+            print(f"ℹ️ Filtered out non-existent columns: {', '.join(keys_to_remove)}")
+        
+        # return filtered_data  # This line doesn't make sense - commented out
 
     def get_table_stats(self):
         """Get table statistics"""
@@ -136,14 +149,14 @@ def filter_deal_fields(self, deal):
             return {'status': 'error', 'error': str(e)}
     
     def save_deal(self, deal):
-    """Save a single deal to Supabase with duplicate checking"""
-    try:
-        # Add this line to filter the deal fields in-place
-        self.filter_deal_fields(deal)
-        
-        # Check if deal with this URL already exists
-        url = deal.get('url')
-        if url:
+        """Save a single deal to Supabase with duplicate checking"""
+        try:
+            # Add this line to filter the deal fields in-place
+            self.filter_deal_fields(deal)
+            
+            # Check if deal with this URL already exists
+            url = deal.get('url')
+            if url:
                 existing = self.supabase.table(self.table_name)\
                     .select('id')\
                     .eq('url', url)\
@@ -198,16 +211,21 @@ def filter_deal_fields(self, deal):
         
         return results
     
-    def normalize_url(self, url):
+    def normalize_url(self, url, mileage=None):
         """
         Normalize URL by removing query parameters to identify true duplicates.
+        For AutoTrader URLs, also updates the maximum-mileage parameter if mileage is provided.
         Example: '/classified/advert/202505052069381?sort=price-asc&searchId=abc123'
         Returns: '/classified/advert/202505052069381'
         """
         if not url:
             return url
         
-        # Remove everything after the first '?'
+        # For AutoTrader URLs, use the enhanced normalize function
+        if "autotrader.co.uk/car-details" in url:
+            return normalize_autotrader_url(url, mileage)
+        
+        # For other URLs, remove everything after the first '?'
         base_url = url.split('?')[0]
         return base_url
     
@@ -344,16 +362,16 @@ def filter_deal_fields(self, deal):
             if not cleanup_result['success']:
                 print(f"⚠️  Duplicate cleanup failed: {cleanup_result.get('error', 'Unknown error')}")
 
-            # STEP 2: Get remaining unique URLs after cleanup
+            # STEP 2: Get remaining unique URLs after cleanup (including mileage for proper normalization)
             if make:
                 existing_response = self.supabase.table(self.table_name)\
-                    .select('url')\
+                    .select('url, mileage')\
                     .eq('make', make)\
                     .eq('model', model)\
                     .execute()
             else:
                 existing_response = self.supabase.table(self.table_name)\
-                    .select('url')\
+                    .select('url, mileage')\
                     .eq('model', model)\
                     .execute()
             
@@ -363,7 +381,14 @@ def filter_deal_fields(self, deal):
                 for row in existing_response.data:
                     url = row.get('url', '')
                     if url:
-                        normalized_url = self.normalize_url(url)
+                        # Get mileage from existing deal for correct normalization
+                        mileage = row.get('mileage', 0)
+                        try:
+                            mileage = int(mileage) if mileage else 0
+                        except (ValueError, TypeError):
+                            mileage = 0
+                        
+                        normalized_url = self.normalize_url(url, mileage)
                         existing_normalized_urls.add(normalized_url)
             
             print(f"🔍 Found {len(existing_normalized_urls)} existing {filter_desc} URLs to check against")
@@ -383,8 +408,14 @@ def filter_deal_fields(self, deal):
                     skipped_count += 1
                     continue
                 
-                # Normalize the deal URL for comparison
-                normalized_deal_url = self.normalize_url(deal_url)
+                # Normalize the deal URL for comparison (with mileage)
+                deal_mileage = deal.get('mileage', 0)
+                try:
+                    deal_mileage = int(deal_mileage) if deal_mileage else 0
+                except (ValueError, TypeError):
+                    deal_mileage = 0
+                
+                normalized_deal_url = self.normalize_url(deal_url, deal_mileage)
                 
                 if normalized_deal_url in existing_normalized_urls:
                     # Normalized URL already exists - skip to prevent duplicate
@@ -758,15 +789,22 @@ def filter_deal_fields(self, deal):
             for deal in new_deals:
                 url = deal.get('url')
                 if url:
-                    normalized_url = normalize_autotrader_url(url)
+                    # Get mileage from the deal for correct maximum-mileage parameter
+                    mileage = deal.get('mileage', 0)
+                    try:
+                        mileage = int(mileage) if mileage else 0
+                    except (ValueError, TypeError):
+                        mileage = 0
+                    
+                    normalized_url = normalize_autotrader_url(url, mileage)
                     new_deal_urls.add(normalized_url)
                     deals_by_url[normalized_url] = deal
             
             print(f"   📊 Found {len(new_deal_urls)} unique deals in current scrape")
             
-            # Get all existing URLs from database
+            # Get all existing URLs from database (including mileage for proper normalization)
             existing_response = service_client.table(self.table_name)\
-                .select('url, id')\
+                .select('url, id, mileage')\
                 .execute()
             
             existing_urls = set()
@@ -776,7 +814,14 @@ def filter_deal_fields(self, deal):
                 for row in existing_response.data:
                     url = row.get('url')
                     if url:
-                        normalized_url = normalize_autotrader_url(url)
+                        # Get mileage from existing deal for correct normalization
+                        mileage = row.get('mileage', 0)
+                        try:
+                            mileage = int(mileage) if mileage else 0
+                        except (ValueError, TypeError):
+                            mileage = 0
+                        
+                        normalized_url = normalize_autotrader_url(url, mileage)
                         existing_urls.add(normalized_url)
                         existing_url_to_id[normalized_url] = row['id']
             
