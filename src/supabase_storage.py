@@ -71,53 +71,51 @@ class SupabaseStorage:
         print(f"Supabase client initialized for table: {table_name}")
 
     def get_valid_columns(self):
-    """
-    Get a list of valid column names from the database schema
-    Uses caching to reduce database queries
-    """
-    if self._valid_columns is not None:
-        return self._valid_columns
-    
-    try:
-        # Query information_schema for column names
-        response = self.supabase.table('information_schema.columns')\
-            .select('column_name')\
-            .eq('table_name', self.table_name)\
-            .execute()
-        
-        if hasattr(response, 'data') and response.data:
-            self._valid_columns = [col['column_name'] for col in response.data]
-            print(f"✅ Retrieved {len(self._valid_columns)} valid columns for table '{self.table_name}'")
+        """
+        Get a list of valid column names from the database schema
+        Uses caching to reduce database queries
+        """
+        if self._valid_columns is not None:
             return self._valid_columns
         
-        print(f"⚠️ No columns found for table '{self.table_name}'")
-        return []
-    except Exception as e:
-        print(f"❌ Error getting valid columns: {e}")
-        # Fallback to an empty list if we can't get columns
-        return []
+        try:
+            # Query information_schema for column names
+            response = self.supabase.table('information_schema.columns')\
+                .select('column_name')\
+                .eq('table_name', self.table_name)\
+                .execute()
+            
+            if hasattr(response, 'data') and response.data:
+                self._valid_columns = [col['column_name'] for col in response.data]
+                print(f"✅ Retrieved {len(self._valid_columns)} valid columns for table '{self.table_name}'")
+                return self._valid_columns
+            
+            print(f"⚠️ No columns found for table '{self.table_name}'")
+            return []
+        except Exception as e:
+            print(f"❌ Error getting valid columns: {e}")
+            # Fallback to an empty list if we can't get columns
+            return []
 
-def filter_deal_fields(self, deal):
-    """
-    Filter deal object in-place to only include keys that exist as columns in the database
-    """
-    valid_columns = self.get_valid_columns()
-    if not valid_columns:
-        print("⚠️ No valid columns found. Proceeding with unfiltered data.")
-        return
-    
-    # Find keys to remove
-    keys_to_remove = [k for k in list(deal.keys()) if k not in valid_columns]
-    
-    # Remove invalid keys
-    for key in keys_to_remove:
-        deal.pop(key, None)
-    
-    # Log any fields that were filtered out
-    if keys_to_remove:
-        print(f"ℹ️ Filtered out non-existent columns: {', '.join(keys_to_remove)}")
-    
-    return filtered_data
+    def filter_deal_fields(self, deal):
+        """
+        Filter deal object in-place to only include keys that exist as columns in the database
+        """
+        valid_columns = self.get_valid_columns()
+        if not valid_columns:
+            print("⚠️ No valid columns found. Proceeding with unfiltered data.")
+            return
+        
+        # Find keys to remove
+        keys_to_remove = [k for k in list(deal.keys()) if k not in valid_columns]
+        
+        # Remove invalid keys
+        for key in keys_to_remove:
+            deal.pop(key, None)
+        
+        # Log any fields that were filtered out
+        if keys_to_remove:
+            print(f"ℹ️ Filtered out non-existent columns: {', '.join(keys_to_remove)}")
 
     def get_table_stats(self):
         """Get table statistics"""
@@ -136,14 +134,14 @@ def filter_deal_fields(self, deal):
             return {'status': 'error', 'error': str(e)}
     
     def save_deal(self, deal):
-    """Save a single deal to Supabase with duplicate checking"""
-    try:
-        # Add this line to filter the deal fields in-place
-        self.filter_deal_fields(deal)
-        
-        # Check if deal with this URL already exists
-        url = deal.get('url')
-        if url:
+        """Save a single deal to Supabase with duplicate checking"""
+        try:
+            # Add this line to filter the deal fields in-place
+            self.filter_deal_fields(deal)
+            
+            # Check if deal with this URL already exists
+            url = deal.get('url')
+            if url:
                 existing = self.supabase.table(self.table_name)\
                     .select('id')\
                     .eq('url', url)\
