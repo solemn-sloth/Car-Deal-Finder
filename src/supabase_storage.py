@@ -42,11 +42,18 @@ def normalize_autotrader_url(url: str, mileage: int = None) -> str:
             filtered_params = query_params
             
             # Update maximum-mileage parameter if mileage is provided
-            if mileage is not None and mileage > 0:
-                # Calculate the correct maximum-mileage (round up to nearest 10,000)
-                max_mileage = ((mileage // 10000) + 1) * 10000
-                filtered_params['maximum-mileage'] = [str(max_mileage)]
-                print(f"🔧 Updated maximum-mileage: {mileage} miles -> {max_mileage} (rounded up)")
+            if mileage is not None:
+                # Convert mileage to integer safely
+                try:
+                    mileage_int = int(mileage) if mileage != '' else 0
+                    if mileage_int > 0:
+                        # Calculate the correct maximum-mileage (round up to nearest 10,000)
+                        max_mileage = ((mileage_int // 10000) + 1) * 10000
+                        filtered_params['maximum-mileage'] = [str(max_mileage)]
+                        print(f"🔧 Updated maximum-mileage: {mileage_int} miles -> {max_mileage} (rounded up)")
+                except (ValueError, TypeError):
+                    # Invalid mileage value, skip updating maximum-mileage
+                    pass
             
             # Reconstruct the URL with preserved parameters
             new_query = urlencode(filtered_params, doseq=True)
