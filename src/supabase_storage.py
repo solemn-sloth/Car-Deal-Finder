@@ -4,36 +4,49 @@ import uuid
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from urllib.parse import urlparse, parse_qs
+from typing import Dict, List, Any, Optional
 
 # Load environment variables
 load_dotenv()
 
 def normalize_autotrader_url(url: str) -> str:
     """
-    Normalize AutoTrader URL by extracting just the car details ID.
-    This removes dynamic search parameters that change between sessions.
-    
-    Example:
-    Input:  https://www.autotrader.co.uk/car-details/202505052069381?sort=price-asc&searchId=5df950fd...
-    Output: https://www.autotrader.co.uk/car-details/202505052069381
+    Normalize AutoTrader URL by ensuring the search parameters are preserved.
+    This maintains the 'return to search results' functionality for users.
     """
-    if not url:
-        return url
-    
     try:
-        # Parse the URL
-        parsed = urlparse(url)
-        
-        # Check if it's an AutoTrader car-details URL
-        if 'autotrader.co.uk' in parsed.netloc and '/car-details/' in parsed.path:
-            # Extract just the base URL without query parameters
-            base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-            return base_url
+        # For AutoTrader URLs, ensure we're keeping all search parameters
+        if "autotrader.co.uk/car-details" in url:
+            # Clean up any unnecessary tracking parameters if needed
+            # but preserve search-related parameters
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            
+            # Parse the URL
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            
+            # Keep only search-related parameters (this list can be adjusted)
+            search_params = ['advertising-location', 'page', 'sort', 'postcode', 
+                             'radius', 'year-from', 'year-to', 'price-from', 
+                             'price-to', 'include-delivery-option', 'body-type',
+                             'fuel-type', 'transmission', 'exclude-writeoff-categories']
+            
+            # Filter to keep only search-related parameters
+            # Note: We're keeping ALL parameters to ensure search functionality works
+            filtered_params = query_params
+            
+            # Reconstruct the URL with preserved parameters
+            new_query = urlencode(filtered_params, doseq=True)
+            new_url_parts = list(parsed_url)
+            new_url_parts[4] = new_query
+            
+            return urlunparse(new_url_parts)
         
         # For other URLs, return as-is
         return url
-    except Exception:
-        # If parsing fails, return original URL
+    except Exception as e:
+        # If parsing fails, log the error and return original URL
+        print(f"Error normalizing URL: {e}")
         return url
 
 class SupabaseStorage:
@@ -51,9 +64,61 @@ class SupabaseStorage:
         # Initialize Supabase client
         self.supabase: Client = create_client(supabase_url, supabase_key)
         self.table_name = table_name
+
+        self._valid_columns = None
+
         
         print(f"Supabase client initialized for table: {table_name}")
+
+    def get_valid_columns(self):
+    """
+    Get a list of valid column names from the database schema
+    Uses caching to reduce database queries
+    """
+    if self._valid_columns is not None:
+        return self._valid_columns
     
+    try:
+        # Query information_schema for column names
+        response = self.supabase.table('information_schema.columns')\
+            .select('column_name')\
+            .eq('table_name', self.table_name)\
+            .execute()
+        
+        if hasattr(response, 'data') and response.data:
+            self._valid_columns = [col['column_name'] for col in response.data]
+            print(f"✅ Retrieved {len(self._valid_columns)} valid columns for table '{self.table_name}'")
+            return self._valid_columns
+        
+        print(f"⚠️ No columns found for table '{self.table_name}'")
+        return []
+    except Exception as e:
+        print(f"❌ Error getting valid columns: {e}")
+        # Fallback to an empty list if we can't get columns
+        return []
+
+def filter_deal_fields(self, deal):
+    """
+    Filter deal object in-place to only include keys that exist as columns in the database
+    """
+    valid_columns = self.get_valid_columns()
+    if not valid_columns:
+        print("⚠️ No valid columns found. Proceeding with unfiltered data.")
+        return
+    
+    # Find keys to remove
+    keys_to_remove = [k for k in list(deal.keys()) if k not in valid_columns]
+    
+    # Remove invalid keys
+    for key in keys_to_remove:
+        deal.pop(key, None)
+    
+    # Log any fields that were filtered out
+    if keys_to_remove:
+        print(f"ℹ️ Filtered out non-existent columns: {', '.join(keys_to_remove)}")
+    
+    return filtered_data
+
     def get_table_stats(self):
         """Get table statistics"""
         try:
@@ -71,11 +136,14 @@ class SupabaseStorage:
             return {'status': 'error', 'error': str(e)}
     
     def save_deal(self, deal):
-        """Save a single deal to Supabase with duplicate checking"""
-        try:
-            # Check if deal with this URL already exists
-            url = deal.get('url')
-            if url:
+    """Save a single deal to Supabase with duplicate checking"""
+    try:
+        # Add this line to filter the deal fields in-place
+        self.filter_deal_fields(deal)
+        
+        # Check if deal with this URL already exists
+        url = deal.get('url')
+        if url:
                 existing = self.supabase.table(self.table_name)\
                     .select('id')\
                     .eq('url', url)\

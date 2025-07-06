@@ -38,13 +38,13 @@ cp .env.example .env
 # Add: SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_ROLE_KEY, RESEND_API_KEY
 
 # Run main scraper
-python src/scraper.py
+python3 src/scraper.py
 
 # Test with limited scope
-python src/scraper.py --max-groups 5 --test-mode
+python3 src/scraper.py --max-groups 5 --test-mode
 
 # Start API server
-python src/api.py  # Runs on http://localhost:8000
+python3 src/api.py  # Runs on http://localhost:8000
 ```
 
 ## 🔧 Key Features
