@@ -3,8 +3,22 @@ import requests.adapters
 import json
 import time
 import random
+import ssl
 from typing import List, Dict, Optional
 from requests.packages.urllib3.util.retry import Retry
+
+class CustomHTTPAdapter(requests.adapters.HTTPAdapter):
+    """Custom adapter with specific cipher suites and TLS versions to mimic browser TLS fingerprints"""
+    def init_poolmanager(self, *args, **kwargs):
+        # Use common client-side cipher suites
+        kwargs['ssl_context'] = self._create_ssl_context()
+        return super().init_poolmanager(*args, **kwargs)
+    
+    def _create_ssl_context(self):
+        context = ssl.create_default_context()
+        # Use cipher suites common to Chrome browsers
+        context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384')
+        return context
 
 def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
     """
@@ -30,18 +44,36 @@ def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
     return raw_url
 
 class AutoTraderAPIClient:
-    def __init__(self, connection_pool_size=10, optimize_connection=True):
+    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None):
         """
         Initialize the AutoTrader API client with configurable connection pooling.
         
         Args:
             connection_pool_size: Size of the connection pool (default: 10)
             optimize_connection: Whether to use connection pooling and other optimizations (default: True)
+            proxy: Optional proxy URL (e.g., "http://user:pass@host:port")
+            proxy_manager: Optional ProxyManager instance for rotation
         """
         self.base_url = "https://www.autotrader.co.uk/at-gateway"
+        self.proxy_manager = proxy_manager
         
         # Create session with optimized connection parameters
         self.session = requests.Session()
+        
+        # Configure proxy if provided directly
+        if proxy:
+            self.session.proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+        # Or use the proxy manager to get a proxy
+        elif self.proxy_manager:
+            proxy_url = self.proxy_manager.get_proxy()
+            if proxy_url:
+                self.session.proxies = {
+                    'http': proxy_url,
+                    'https': proxy_url
+                }
         
         if optimize_connection:
             # Configure connection pooling with optimized parameters
@@ -77,24 +109,92 @@ class AutoTraderAPIClient:
             
         self.setup_headers()
     
+    def randomize_headers(self):
+        """Generate randomized browser-like headers to avoid fingerprinting"""
+        # Browser versions - use a mix of recent Chrome, Firefox, and Edge versions
+        chrome_versions = ["116.0.5845.110", "117.0.5938.132", "118.0.5993.88", "119.0.6045.123"]
+        firefox_versions = ["116.0", "117.0", "118.0", "119.0"]
+        edge_versions = ["116.0.1938.69", "117.0.2045.47", "118.0.2088.69", "119.0.2151.44"]
+        
+        # OS platforms with realistic variations
+        os_platforms = [
+            "Windows NT 10.0; Win64; x64", 
+            "Macintosh; Intel Mac OS X 10_15_7",
+            "Macintosh; Intel Mac OS X 11_6_0",
+            "X11; Linux x86_64",
+            "X11; Ubuntu; Linux x86_64"
+        ]
+        
+        # Select random platform and browser type
+        platform = random.choice(os_platforms)
+        browser_type = random.choice(["chrome", "firefox", "edge"])
+        
+        # Build user agent based on browser type
+        user_agent = ""
+        if browser_type == "chrome":
+            version = random.choice(chrome_versions)
+            user_agent = f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
+            browser_version = version.split(".")[0]
+            ua_brand = f'"Google Chrome";v="{browser_version}", "Chromium";v="{browser_version}", "Not=A?Brand";v="99"'
+        elif browser_type == "firefox":
+            version = random.choice(firefox_versions)
+            user_agent = f"Mozilla/5.0 ({platform}; rv:{version}) Gecko/20100101 Firefox/{version}"
+            browser_version = version.split(".")[0]
+            ua_brand = f'"Firefox";v="{browser_version}", "Not=A?Brand";v="99"'
+        else:  # edge
+            version = random.choice(edge_versions)
+            user_agent = f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36 Edg/{version}"
+            browser_version = version.split(".")[0]
+            ua_brand = f'"Microsoft Edge";v="{browser_version}", "Chromium";v="{browser_version}", "Not=A?Brand";v="99"'
+        
+        # Random accept language variations
+        accept_langs = [
+            "en-GB,en-US;q=0.9,en;q=0.8",
+            "en-US,en;q=0.9",
+            "en-GB,en;q=0.8,fr;q=0.7",
+            "en;q=0.9,en-GB;q=0.8"
+        ]
+        
+        # Generate headers dictionary
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": random.choice(accept_langs),
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "sec-ch-ua": ua_brand,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": f'"{platform.split(";")[0] if ";" in platform else platform}"',
+            "DNT": "1" if random.choice([True, False]) else "0",
+            "Cache-Control": random.choice(["max-age=0", "no-cache"]),
+            "Content-Type": "application/json",
+            "Origin": "https://www.autotrader.co.uk",
+            "Referer": "https://www.autotrader.co.uk/car-search?make=kia&model=sportage&postcode=SW1A1AA",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "x-sauron-app-name": "sauron-search-results-app",
+            "x-sauron-app-version": f"{random.randint(1000000, 9999999)}"
+        }
+        
+        # Add randomized ordering to further reduce fingerprinting
+        shuffled_headers = {}
+        keys = list(headers.keys())
+        random.shuffle(keys)
+        
+        for key in keys:
+            shuffled_headers[key] = headers[key]
+            
+        return shuffled_headers
+    
     def setup_headers(self):
-        """Set up the headers based on your curl request"""
-        self.session.headers.update({
-            'accept': '*/*',
-            'accept-language': 'en-GB,en;q=0.9',
-            'content-type': 'application/json',
-            'origin': 'https://www.autotrader.co.uk',
-            'referer': 'https://www.autotrader.co.uk/',
-            'sec-ch-ua': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"macOS"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-            'x-sauron-app-name': 'sauron-search-results-app',
-            'x-sauron-app-version': '5899c683e3'
-        })
+        """Set up the headers with randomized fingerprinting-resistant values"""
+        # Apply randomized headers
+        self.session.headers.update(self.randomize_headers())
+        
+        # Configure the custom TLS adapter for HTTPS connections
+        self.session.mount('https://', CustomHTTPAdapter())
     
     def search_cars(self, make: str, model: str, postcode: str = "M15 4FN", 
                    min_year: int = 2010, max_year: int = 2023, 
@@ -102,9 +202,11 @@ class AutoTraderAPIClient:
         """
         Search for cars using AutoTrader's GraphQL API
         """
+        # Randomize headers for each request to avoid fingerprinting
+        self.session.headers.update(self.randomize_headers())
         
-        # Generate a unique search ID (you might want to make this more sophisticated)
-        search_id = f"fc840876-f46d-48b7-8d5f-{random.randint(100000000000, 999999999999)}"
+        # Generate a unique search ID with realistic variation
+        search_id = f"search-{random.randint(100000000000, 999999999999)}-{int(time.time())}"
         
         # Build the GraphQL query payload
         payload = [
@@ -209,6 +311,14 @@ class AutoTraderAPIClient:
         ]
         
         try:
+            # First visit the search page to establish cookies and referrer legitimacy
+            search_url = f"https://www.autotrader.co.uk/car-search?make={make.lower()}&model={model.lower()}&postcode={postcode}"
+            self.session.get(search_url, timeout=self.timeout)
+            
+            # Increased delay between requests to reduce server load and avoid detection
+            time.sleep(random.uniform(0.5, 0.8))
+            
+            # Now make the actual API request
             response = self.session.post(
                 self.base_url + "?opname=SearchResultsListingsGridQuery",
                 json=payload,
@@ -217,12 +327,34 @@ class AutoTraderAPIClient:
             
             if response.status_code != 200:
                 print(f"Response error: {response.status_code}")
+                
+                # If we have a proxy manager and get a 403 error, blacklist this proxy
+                if response.status_code == 403 and self.proxy_manager and self.session.proxies:
+                    proxy_url = self.session.proxies.get('https') or self.session.proxies.get('http')
+                    if proxy_url:
+                        ip = self.proxy_manager.extract_ip(proxy_url)
+                        if ip:
+                            self.proxy_manager.blacklist_ip(ip, reason=f"HTTP {response.status_code}")
+                            # Try to get a new proxy for future requests
+                            new_proxy = self.proxy_manager.get_proxy()
+                            if new_proxy:
+                                self.session.proxies = {'http': new_proxy, 'https': new_proxy}
             
             response.raise_for_status()
             return response.json()
             
         except requests.exceptions.RequestException as e:
             print(f"Error making request: {e}")
+            
+            # Similar error handling for exceptions
+            if hasattr(e, 'response') and e.response and e.response.status_code == 403:
+                if self.proxy_manager and self.session.proxies:
+                    proxy_url = self.session.proxies.get('https') or self.session.proxies.get('http')
+                    if proxy_url:
+                        ip = self.proxy_manager.extract_ip(proxy_url)
+                        if ip:
+                            self.proxy_manager.blacklist_ip(ip, reason="HTTP 403 Exception")
+            
             return None
     
     def get_all_cars(self, make: str, model: str, postcode: str = "M15 4FN",
@@ -277,8 +409,8 @@ class AutoTraderAPIClient:
                 
             page += 1
             
-            # Minimal delay between requests with slight variability to avoid detection
-            time.sleep(random.uniform(0.15, 0.35))  # Faster but still randomized
+            # Increased delay between page requests to reduce detection risk
+            time.sleep(random.uniform(0.5, 0.8))  # Balanced for both speed and stealthiness
         
         # No found message needed - just finish the dots
         print()  # Print a newline after the dots

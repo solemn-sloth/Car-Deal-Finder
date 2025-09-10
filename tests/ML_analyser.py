@@ -742,8 +742,19 @@ def predict_profit_margins(
     # Extract features
     features_df = prepare_features(private_df)
     
-    # Get the feature columns the model was trained on
-    feature_columns = [col for col in features_df.columns if col != 'market_value']  # We exclude market_value as it's our target base
+    # Get feature columns - make sure they match exactly what was used in training
+    feature_columns = ['asking_price', 'mileage', 'age', 'market_value', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric']
+    
+    # Check if all required columns exist in the DataFrame, add any missing ones
+    for col in feature_columns:
+        if col not in features_df.columns:
+            logger.warning(f"Column {col} missing in prediction data, adding with default values")
+            if col == 'market_value':
+                # For market_value, use asking_price as a proxy
+                features_df[col] = features_df['asking_price']
+            else:
+                # For other columns, use zeros as default
+                features_df[col] = 0
     
     # Ensure all columns are numeric before scaling (same process as in training)
     for col in feature_columns:
@@ -757,7 +768,12 @@ def predict_profit_margins(
     # Display the final feature dtypes after conversion for debugging
     logger.info(f"Prediction features dtypes: {features_df[feature_columns].dtypes.to_dict()}")
     
-    # Scale features
+    # Scale features - but ensure we have all columns that were present during training
+    # If market_value wasn't in the training data, use asking_price as a proxy since that's what we did earlier
+    if 'market_value' not in features_df.columns:
+        logger.warning("Adding market_value column using asking_price as proxy to match training features")
+        features_df['market_value'] = features_df['asking_price']
+    
     X = scaler.transform(features_df[feature_columns])
     dtest = xgb.DMatrix(X)
     

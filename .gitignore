@@ -56,3 +56,4 @@ screenshots/
 # Project specific
 /archive/
 /tests/tasklist.md
+/config/proxies.json
