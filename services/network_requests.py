@@ -4,11 +4,16 @@ import json
 import time
 import random
 import ssl
+import secrets
 from typing import List, Dict, Optional
 from requests.packages.urllib3.util.retry import Retry
 
 class CustomHTTPAdapter(requests.adapters.HTTPAdapter):
     """Custom adapter with specific cipher suites and TLS versions to mimic browser TLS fingerprints"""
+    def __init__(self, *args, verify_ssl=True, **kwargs):
+        self.verify_ssl = verify_ssl
+        super().__init__(*args, **kwargs)
+        
     def init_poolmanager(self, *args, **kwargs):
         # Use common client-side cipher suites
         kwargs['ssl_context'] = self._create_ssl_context()
@@ -16,8 +21,57 @@ class CustomHTTPAdapter(requests.adapters.HTTPAdapter):
     
     def _create_ssl_context(self):
         context = ssl.create_default_context()
-        # Use cipher suites common to Chrome browsers
-        context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384')
+        
+        # CloudFlare specifically looks for certain cipher suites and TLS features
+        # Randomize cipher order to avoid static TLS fingerprint detection
+        base_ciphers = [
+            'ECDHE-ECDSA-AES128-GCM-SHA256',
+            'ECDHE-RSA-AES128-GCM-SHA256',
+            'ECDHE-ECDSA-AES256-GCM-SHA384',
+            'ECDHE-RSA-AES256-GCM-SHA384',
+            'ECDHE-ECDSA-CHACHA20-POLY1305',
+            'ECDHE-RSA-CHACHA20-POLY1305',
+            'ECDHE-RSA-AES128-SHA',
+            'ECDHE-RSA-AES256-SHA'
+        ]
+        
+        # Randomize cipher order for each new connection to avoid fingerprinting
+        randomized_ciphers = base_ciphers.copy()
+        secrets.SystemRandom().shuffle(randomized_ciphers)
+        
+        context.set_ciphers(':'.join(randomized_ciphers))
+        
+        # Set TLS version to 1.2 (CloudFlare sometimes has issues with TLS 1.3)
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
+        context.options |= ssl.OP_NO_COMPRESSION  # Disable TLS compression for better mimicking browsers
+        
+        # Disable SSL verification if requested
+        if not self.verify_ssl:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        else:
+            # Ensure hostname checking is enabled when SSL verification is on
+            context.check_hostname = True
+            context.verify_mode = ssl.CERT_REQUIRED
+        
+        # Apply elliptic curves that browsers use - randomize order
+        try:
+            import ctypes
+            libssl = ctypes.cdll.LoadLibrary(ssl._ssl.__file__)
+            libssl.SSL_CTX_set1_curves_list.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            libssl.SSL_CTX_set1_curves_list.restype = ctypes.c_int
+            
+            # Randomize elliptic curve order to avoid static fingerprint
+            base_curves = ["X25519", "secp256r1", "prime256v1", "secp384r1"]
+            randomized_curves = base_curves.copy()
+            secrets.SystemRandom().shuffle(randomized_curves)
+            
+            curves = ":".join(randomized_curves).encode()
+            libssl.SSL_CTX_set1_curves_list(context._ctx, curves)
+        except (AttributeError, OSError):
+            # If we can't set up the curves, continue anyway
+            pass
+            
         return context
 
 def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
@@ -44,21 +98,42 @@ def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
     return raw_url
 
 class AutoTraderAPIClient:
-    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None):
-        """
-        Initialize the AutoTrader API client with configurable connection pooling.
+    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None, verify_ssl=True):
+        """Initialize the AutoTrader API client with configurable connection pooling.
         
         Args:
             connection_pool_size: Size of the connection pool (default: 10)
             optimize_connection: Whether to use connection pooling and other optimizations (default: True)
             proxy: Optional proxy URL (e.g., "http://user:pass@host:port")
             proxy_manager: Optional ProxyManager instance for rotation
+            verify_ssl: Whether to verify SSL certificates (set to False to ignore SSL errors)
         """
         self.base_url = "https://www.autotrader.co.uk/at-gateway"
         self.proxy_manager = proxy_manager
+        self._first_request_made = False  # Track if initial request has been made
+        self._session_start_time = time.time()  # Track session start for behavior
         
         # Create session with optimized connection parameters
         self.session = requests.Session()
+        
+        # Set SSL verification (can be disabled for testing)
+        self.session.verify = verify_ssl
+        
+        # Add initial CloudFlare cookies to help bypass protection
+        self.session.cookies.set('cf_clearance', self._generate_cf_clearance(), 
+                               domain='.autotrader.co.uk', path='/')
+        self.session.cookies.set('cf_bm', self._generate_cf_bm(), 
+                               domain='.autotrader.co.uk', path='/')
+        self.session.cookies.set('cf_chl_2', self._generate_cf_chl(), 
+                               domain='.autotrader.co.uk', path='/')
+        self.session.cookies.set('cf_chl_prog', 'x19', 
+                               domain='.autotrader.co.uk', path='/')
+        
+        # Add CloudFlare browser verification cookies
+        self.session.cookies.set('_cfuvid', self._generate_cf_uvid(), 
+                               domain='.autotrader.co.uk', path='/')
+        self.session.cookies.set('_pxvid', self._generate_px_vid(),
+                               domain='.autotrader.co.uk', path='/')
         
         # Configure proxy if provided directly
         if proxy:
@@ -108,85 +183,182 @@ class AutoTraderAPIClient:
             self.timeout = 30
             
         self.setup_headers()
-    
-    def randomize_headers(self):
-        """Generate randomized browser-like headers to avoid fingerprinting"""
-        # Browser versions - use a mix of recent Chrome, Firefox, and Edge versions
-        chrome_versions = ["116.0.5845.110", "117.0.5938.132", "118.0.5993.88", "119.0.6045.123"]
-        firefox_versions = ["116.0", "117.0", "118.0", "119.0"]
-        edge_versions = ["116.0.1938.69", "117.0.2045.47", "118.0.2088.69", "119.0.2151.44"]
         
-        # OS platforms with realistic variations
-        os_platforms = [
-            "Windows NT 10.0; Win64; x64", 
-            "Macintosh; Intel Mac OS X 10_15_7",
-            "Macintosh; Intel Mac OS X 11_6_0",
-            "X11; Linux x86_64",
-            "X11; Ubuntu; Linux x86_64"
+    def _generate_cf_clearance(self):
+        """Generate a plausible CloudFlare clearance cookie value
+        
+        Format matches the pattern observed in real CloudFlare cookies:
+        [random hex]-[unix timestamp]-[0-1]-[1-13]-[random digits]
+        """
+        import time, uuid
+        # More realistic timestamp - recent past (last 7 days)
+        timestamp = str(int(time.time() - random.randint(3600, 604800)))  # Between 1 hour and 7 days ago
+        random_part = uuid.uuid4().hex[:20]  # Get a random string of correct length
+        
+        # Last parts are typically encoding information about the client
+        # Format: {random}-{timestamp}-{0/1}-{1-13}-{random}
+        return f"{random_part}-{timestamp}-{random.randint(0,1)}-{random.randint(1,13)}-{random.randint(100000, 999999)}"
+    
+    def _generate_cf_bm(self):
+        """Generate a plausible CloudFlare bot management cookie (cf_bm)
+        
+        Format: base64-like string with specific length and pattern
+        """
+        import string, base64, time
+        
+        # Start with a valid-looking timestamp and device identifier
+        timestamp = int(time.time())
+        device_id = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(8))
+        
+        # Generate some plausible binary data and encode it
+        data = f"{timestamp}:{device_id}:some-verification-data-{random.randint(1000, 9999)}"
+        
+        # Make it look base64-encoded but ensure it has the right pattern with hyphens
+        encoded = base64.b64encode(data.encode()).decode()
+        parts = [encoded[i:i+12] for i in range(0, len(encoded), 12)]
+        
+        # CloudFlare bot management cookies typically have this format
+        return f"{parts[0]}-{parts[1][:8]}-{int(time.time())}-{random.randint(1,9)}-q"
+        
+    def _generate_cf_uvid(self):
+        """Generate a plausible CloudFlare unique visitor ID cookie
+        
+        Format: UUID-like string that CloudFlare uses for visitor identification
+        """
+        import uuid
+        # Real _cfuvid cookies are UUIDs with a custom prefix
+        return f"cfuv-{uuid.uuid4()}"
+        
+    def _generate_px_vid(self):
+        """Generate a plausible PerimeterX visitor ID
+        
+        Format: Base64-like string used by PerimeterX (CloudFlare's bot detection partner)
+        """
+        import string, time
+        # PerimeterX uses similar format but with different structure
+        chars = string.ascii_lowercase + string.digits
+        
+        # Format is typically: [timestamp]-[random]-[random]
+        timestamp = hex(int(time.time()))[2:]
+        random_part1 = ''.join(random.choice(chars) for _ in range(8))
+        random_part2 = ''.join(random.choice(chars) for _ in range(6))
+        
+        return f"{timestamp}-{random_part1}-{random_part2}"
+    
+    def _generate_cf_chl(self):
+        """Generate a plausible CloudFlare challenge cookie
+        
+        Format is typically base64-like with specific patterns and length
+        """
+        import string
+        
+        # More precise character set matching actual CF cookies
+        chars = string.ascii_letters + string.digits + '_-'
+        
+        # More accurate length - real cookies have more consistent lengths
+        length = random.randint(85, 95)  # These cookies have a more consistent length
+        
+        # Generate with proper structure (segments separated by underscores)
+        segments = [
+            ''.join(random.choice(chars) for _ in range(random.randint(20, 25))),
+            ''.join(random.choice(chars) for _ in range(random.randint(25, 30))),
+            ''.join(random.choice(chars) for _ in range(random.randint(30, 35)))
         ]
         
-        # Select random platform and browser type
+        return '_'.join(segments)
+    
+    def randomize_headers(self):
+        """Generate CloudFlare-optimized browser-like headers to avoid fingerprinting"""
+        # Browser versions - use Chrome as it has the best compatibility with CloudFlare
+        # Focus on recent stable versions that CloudFlare is least likely to block
+        chrome_versions = ["118.0.5993.88", "119.0.6045.123", "120.0.6099.129"]
+        
+        # OS platforms - Focus on common Windows and Mac platforms
+        os_platforms = [
+            "Windows NT 10.0; Win64; x64",  # Most common Windows platform
+            "Macintosh; Intel Mac OS X 10_15_7"  # Common Mac platform
+        ]
+        
+        # Select random platform - prefer Windows slightly (more common)
         platform = random.choice(os_platforms)
-        browser_type = random.choice(["chrome", "firefox", "edge"])
         
-        # Build user agent based on browser type
-        user_agent = ""
-        if browser_type == "chrome":
-            version = random.choice(chrome_versions)
-            user_agent = f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
-            browser_version = version.split(".")[0]
-            ua_brand = f'"Google Chrome";v="{browser_version}", "Chromium";v="{browser_version}", "Not=A?Brand";v="99"'
-        elif browser_type == "firefox":
-            version = random.choice(firefox_versions)
-            user_agent = f"Mozilla/5.0 ({platform}; rv:{version}) Gecko/20100101 Firefox/{version}"
-            browser_version = version.split(".")[0]
-            ua_brand = f'"Firefox";v="{browser_version}", "Not=A?Brand";v="99"'
-        else:  # edge
-            version = random.choice(edge_versions)
-            user_agent = f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36 Edg/{version}"
-            browser_version = version.split(".")[0]
-            ua_brand = f'"Microsoft Edge";v="{browser_version}", "Chromium";v="{browser_version}", "Not=A?Brand";v="99"'
+        # Use Chrome only as it has best CloudFlare compatibility
+        version = random.choice(chrome_versions)
+        user_agent = f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
+        browser_version = version.split(".")[0]
+        ua_brand = f'"Google Chrome";v="{browser_version}", "Chromium";v="{browser_version}", "Not=A?Brand";v="99"'
         
-        # Random accept language variations
+        # CloudFlare often checks these specific header values
         accept_langs = [
             "en-GB,en-US;q=0.9,en;q=0.8",
             "en-US,en;q=0.9",
-            "en-GB,en;q=0.8,fr;q=0.7",
-            "en;q=0.9,en-GB;q=0.8"
+            "en-GB,en;q=0.9",
+            "en-US,en-GB;q=0.9,en;q=0.8"
         ]
         
-        # Generate headers dictionary
+        # Device memory values typical of real browsers (in GB)
+        device_memory = random.choice(["4", "8", "16"])
+        
+        # Screen color depth (typical values)
+        color_depth = random.choice(["24", "30", "32"])
+        
+        # Viewport width (typical values)
+        viewport_width = random.choice(["1280", "1366", "1440", "1536", "1920"])
+        viewport_height = random.choice(["720", "768", "900", "864", "1080"])
+        
+        # DPR (Device Pixel Ratio) - common values
+        dpr = random.choice(["1", "1.25", "1.5", "2", "2.5"])
+        
+        # Generate headers dictionary optimized for CloudFlare
         headers = {
+            # Essential headers CloudFlare always checks
             "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": random.choice(accept_langs),
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
+            
+            # Security headers that CloudFlare checks
             "sec-ch-ua": ua_brand,
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": f'"{platform.split(";")[0] if ";" in platform else platform}"',
-            "DNT": "1" if random.choice([True, False]) else "0",
-            "Cache-Control": random.choice(["max-age=0", "no-cache"]),
-            "Content-Type": "application/json",
-            "Origin": "https://www.autotrader.co.uk",
-            "Referer": "https://www.autotrader.co.uk/car-search?make=kia&model=sportage&postcode=SW1A1AA",
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-user": "?1",
+            "sec-fetch-dest": "document",
+            
+            # Client hints that real browsers send - these help bypass CloudFlare
+            "sec-ch-ua-arch": random.choice(['x86', 'arm']),
+            "sec-ch-ua-full-version": version, # Full browser version
+            "sec-ch-ua-platform-version": random.choice(['10.0.0', '11.0.0', '12.0.0', '15.6.1']),
+            "sec-ch-ua-model": "",  # Desktop browsers don't have a model
+            "sec-ch-ua-bitness": random.choice(['64', '32']),
+            "sec-ch-ua-wow64": "?0",  # Not Windows-on-Windows
+            "sec-ch-device-memory": device_memory,
+            
+            # Additional browser capability indicators
+            "device-memory": device_memory,
+            "dpr": dpr,
+            "viewport-width": viewport_width,
+            "rtt": random.choice(["50", "100", "150"]),  # Network round-trip time
+            "downlink": random.choice(["10", "5.75", "1.75"]),  # Connection speed
+            "ect": random.choice(["4g", "3g"]),  # Effective connection type
+            
+            # CloudFlare sometimes checks for these
+            "Referer": "https://www.autotrader.co.uk/",
+            "Origin": "https://www.autotrader.co.uk",
+            
+            # Cache and cookie settings
+            "Cache-Control": "max-age=0",  # CloudFlare prefers this over no-cache
+            
+            # Additional AutoTrader-specific headers
             "x-sauron-app-name": "sauron-search-results-app",
             "x-sauron-app-version": f"{random.randint(1000000, 9999999)}"
         }
         
-        # Add randomized ordering to further reduce fingerprinting
-        shuffled_headers = {}
-        keys = list(headers.keys())
-        random.shuffle(keys)
-        
-        for key in keys:
-            shuffled_headers[key] = headers[key]
-            
-        return shuffled_headers
+        # CloudFlare prefers headers in a specific order, so we won't shuffle them
+        return headers
     
     def setup_headers(self):
         """Set up the headers with randomized fingerprinting-resistant values"""
@@ -194,16 +366,51 @@ class AutoTraderAPIClient:
         self.session.headers.update(self.randomize_headers())
         
         # Configure the custom TLS adapter for HTTPS connections
-        self.session.mount('https://', CustomHTTPAdapter())
+        self.session.mount('https://', CustomHTTPAdapter(verify_ssl=self.session.verify))
+    
+    def _evolve_session_headers(self):
+        """Subtly evolve headers during session to simulate organic browsing"""
+        # Update cache-control occasionally to simulate browser behavior
+        if random.random() < 0.3:  # 30% chance
+            cache_options = ["max-age=0", "no-cache", "no-store, no-cache, must-revalidate"]
+            self.session.headers['Cache-Control'] = random.choice(cache_options)
+        
+        # Vary some client hints slightly
+        if random.random() < 0.4:  # 40% chance  
+            device_memory = random.choice(["4", "8", "16"])
+            self.session.headers['sec-ch-device-memory'] = device_memory
+            
+        # Update viewport width occasionally
+        if random.random() < 0.2:  # 20% chance
+            viewport_width = random.choice(["1280", "1366", "1440", "1536", "1920"])
+            self.session.headers['viewport-width'] = viewport_width
     
     def search_cars(self, make: str, model: str, postcode: str = "M15 4FN", 
                    min_year: int = 2010, max_year: int = 2023, 
-                   max_mileage: int = 100000, page: int = 1, private_only: bool = True) -> Dict:
+                   max_mileage: int = 100000, page: int = 1, private_only: bool = True,
+                   max_retries: int = 2) -> Dict:
         """
         Search for cars using AutoTrader's GraphQL API
+        
+        Args:
+            make: Car manufacturer
+            model: Car model
+            postcode: UK postcode for search location
+            min_year: Minimum manufacturing year
+            max_year: Maximum manufacturing year
+            max_mileage: Maximum mileage
+            page: Results page number
+            private_only: Whether to include only private seller listings
+            max_retries: Maximum number of retries for CloudFlare errors
+        
+        Returns:
+            Dict containing search results data
         """
         # Randomize headers for each request to avoid fingerprinting
         self.session.headers.update(self.randomize_headers())
+        
+        # Track retry attempts
+        retry_count = 0
         
         # Generate a unique search ID with realistic variation
         search_id = f"search-{random.randint(100000000000, 999999999999)}-{int(time.time())}"
@@ -310,23 +517,190 @@ class AutoTraderAPIClient:
             }
         ]
         
-        try:
-            # First visit the search page to establish cookies and referrer legitimacy
-            search_url = f"https://www.autotrader.co.uk/car-search?make={make.lower()}&model={model.lower()}&postcode={postcode}"
-            self.session.get(search_url, timeout=self.timeout)
-            
-            # Increased delay between requests to reduce server load and avoid detection
-            time.sleep(random.uniform(0.5, 0.8))
-            
-            # Now make the actual API request
-            response = self.session.post(
-                self.base_url + "?opname=SearchResultsListingsGridQuery",
-                json=payload,
-                timeout=self.timeout
-            )
-            
+        while retry_count <= max_retries:
+            try:
+                # First visit the search page to establish cookies and referrer legitimacy
+                search_url = f"https://www.autotrader.co.uk/car-search?make={make.lower()}&model={model.lower()}&postcode={postcode}"
+                
+                # Add more random query parameters to appear more human-like
+                from urllib.parse import urlencode
+                import datetime
+                
+                # Generate random query parameters that look legitimate
+                random_params = {
+                    # Add a random include parameter
+                    'include': random.choice(['', 'derivativeData', 'extendedData']),
+                    
+                    # Add a random sort parameter
+                    'sort': random.choice(['', 'relevance', 'price-asc', 'price-desc', 'year-desc']),
+                    
+                    # Add a random tracking parameter that looks realistic
+                    '_': str(int(datetime.datetime.now().timestamp() * 1000)),
+                    
+                    # Sometimes add a random utm parameter to look like a marketing link
+                    'utm_source': random.choice(['', 'direct', 'search', 'email']) if random.random() > 0.7 else ''
+                }
+                
+                # Remove empty parameters
+                random_params = {k: v for k, v in random_params.items() if v}
+                
+                # Add parameters to URL if any exist
+                if random_params:
+                    param_string = urlencode(random_params)
+                    search_url = f"{search_url}&{param_string}"
+                
+                # Randomize accept and content-type headers for this specific request
+                search_headers = {
+                    'Accept': random.choice([
+                        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    ]),
+                    'Accept-Language': random.choice([
+                        'en-GB,en;q=0.9',
+                        'en-US,en;q=0.8',
+                        'en-GB,en-US;q=0.9,en;q=0.8'
+                    ])
+                }
+                
+                # Generate random but plausible cookies on each retry
+                if retry_count > 0:
+                    # Clear existing cookies first to start fresh
+                    self.session.cookies.clear(domain='.autotrader.co.uk')
+                    
+                    # Add regenerated CloudFlare cookies
+                    self.session.cookies.set('cf_clearance', self._generate_cf_clearance(), 
+                                          domain='.autotrader.co.uk', path='/')
+                    self.session.cookies.set('cf_bm', self._generate_cf_bm(), 
+                                          domain='.autotrader.co.uk', path='/')
+                    self.session.cookies.set('cf_chl_2', self._generate_cf_chl(), 
+                                          domain='.autotrader.co.uk', path='/')
+                    self.session.cookies.set('cf_chl_prog', f"x{random.randint(10, 99)}", 
+                                          domain='.autotrader.co.uk', path='/')
+                    self.session.cookies.set('_cfuvid', self._generate_cf_uvid(), 
+                                          domain='.autotrader.co.uk', path='/')
+                    self.session.cookies.set('_pxvid', self._generate_px_vid(),
+                                          domain='.autotrader.co.uk', path='/')
+                    
+                    # Add human-like delay between retries
+                    time.sleep(random.uniform(2.5, 4.5))
+                    
+                    # Get a completely fresh set of headers
+                    self.session.headers.clear()
+                    self.session.headers.update(self.randomize_headers())
+                
+                # Make the initial search page request with custom headers
+                initial_response = self.session.get(search_url, timeout=self.timeout, headers=search_headers)
+                
+                # Check for CloudFlare challenge page
+                if "Just a moment" in initial_response.text and retry_count < max_retries:
+                    print(f"Detected CloudFlare challenge page on attempt {retry_count+1}. Retrying with new cookies...")
+                    retry_count += 1
+                    continue
+                
+                # Human-like behavior simulation - only on first request
+                if not self._first_request_made:
+                    # Session warmup: let cookies mature for 2-5 seconds
+                    warmup_delay = random.uniform(2.0, 5.0)
+                    time.sleep(warmup_delay)
+                    
+                    # Simulate realistic page processing time (3-8 seconds total)
+                    reading_delay = random.uniform(3.0, 8.0)
+                    time.sleep(reading_delay)
+                    
+                    # Add brief "decision" pause before API call
+                    thinking_delay = random.uniform(0.5, 1.5) 
+                    time.sleep(thinking_delay)
+                    
+                    # Evolve headers slightly to simulate organic browsing
+                    self._evolve_session_headers()
+                else:
+                    # Subsequent requests: minimal delay to maintain speed
+                    time.sleep(random.uniform(0.3, 0.8))
+                
+                # Add query parameters to the API request to look more legitimate
+                api_params = {
+                    'opname': 'SearchResultsListingsGridQuery',
+                    # Add random cache buster parameter
+                    'cb': str(random.randint(100000, 999999)),
+                    # Add random tracking parameter
+                    'seq': str(random.randint(1, 5))
+                }
+                
+                # Create the API URL with parameters
+                from urllib.parse import urlencode
+                api_url = f"{self.base_url}?{urlencode(api_params)}"
+                
+                # Generate more specific headers for the API request
+                api_headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json, text/plain, */*',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Origin': 'https://www.autotrader.co.uk',
+                    'Referer': search_url,
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin',
+                    # Add CloudFlare-specific header
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+                
+                # Now make the actual API request with the custom headers
+                response = self.session.post(
+                    api_url,
+                    json=payload,
+                    timeout=self.timeout,
+                    headers=api_headers
+                )
+                
+                # Mark first request as completed for future timing optimization
+                if not self._first_request_made:
+                    self._first_request_made = True
+                
+                # Exit retry loop if successful
+                break
+                
+            except requests.exceptions.RequestException as e:
+                # Handle proxy-related errors
+                if self.proxy_manager and self.session.proxies:
+                    proxy_url = self.session.proxies.get('https') or self.session.proxies.get('http')
+                    if proxy_url and ("403" in str(e) or "proxy" in str(e).lower()):
+                        ip = self.proxy_manager.extract_ip(proxy_url)
+                        if ip:
+                            self.proxy_manager.blacklist_ip(ip, reason=f"Error: {str(e)[:100]}")
+                            # Get a new proxy for future requests
+                            new_proxy = self.proxy_manager.get_proxy()
+                            if new_proxy:
+                                self.session.proxies = {'http': new_proxy, 'https': new_proxy}
+                
+                # Check if we should retry
+                if retry_count < max_retries and ("403" in str(e) or "timeout" in str(e).lower()):
+                    print(f"Request error on attempt {retry_count+1}: {str(e)[:100]}. Retrying...")
+                    retry_count += 1
+                    continue
+                else:
+                    # Log the error and raise it
+                    print(f"Fatal request error: {e}")
+                    raise
+        
+        # After the retry loop, process the response
+        if 'response' in locals():  # Check if response variable exists
+            # Log detailed response information for debugging
             if response.status_code != 200:
                 print(f"Response error: {response.status_code}")
+                
+                # Try to extract and log detailed error information
+                try:
+                    error_content = response.text[:500]  # Get first 500 chars to avoid huge output
+                    import logging
+                    logging.info(f"Error response content: {error_content}")
+                except:
+                    pass
+                
+                # Check for CloudFlare challenge page in response
+                if response.status_code == 403 and "Just a moment" in response.text:
+                    print(f"Detected CloudFlare challenge in response. This should have been caught earlier.")
+                    # We can't continue here as we're outside the loop - just log it
                 
                 # If we have a proxy manager and get a 403 error, blacklist this proxy
                 if response.status_code == 403 and self.proxy_manager and self.session.proxies:
@@ -340,36 +714,56 @@ class AutoTraderAPIClient:
                             if new_proxy:
                                 self.session.proxies = {'http': new_proxy, 'https': new_proxy}
             
+            # Log successful response info
+            if response.status_code == 200:
+                try:
+                    response_json = response.json()
+                    
+                    # Check for empty data in successful response
+                    if not response_json or len(response_json) == 0:
+                        print("Warning: Received empty JSON response with status 200")
+                    elif 'errors' in response_json:
+                        print(f"Warning: Response contains errors: {response_json['errors']}")
+                    
+                    return response_json
+                except Exception as e:
+                    print(f"Error parsing JSON response: {e}")
+                    # Log the first part of the response content
+                    try:
+                        content = response.text[:500]
+                        print(f"Response content snippet: {content}")
+                    except:
+                        pass
+                    return None
+            
             response.raise_for_status()
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Error making request: {e}")
-            
-            # Similar error handling for exceptions
-            if hasattr(e, 'response') and e.response and e.response.status_code == 403:
-                if self.proxy_manager and self.session.proxies:
-                    proxy_url = self.session.proxies.get('https') or self.session.proxies.get('http')
-                    if proxy_url:
-                        ip = self.proxy_manager.extract_ip(proxy_url)
-                        if ip:
-                            self.proxy_manager.blacklist_ip(ip, reason="HTTP 403 Exception")
-            
-            return None
+            return None  # This will only be reached if raise_for_status doesn't raise an exception
+        
+        # If we couldn't even get a response object
+        return None
     
     def get_all_cars(self, make: str, model: str, postcode: str = "M15 4FN",
                      min_year: int = 2010, max_year: int = 2023, 
                      max_mileage: int = 100000, max_pages: int = None) -> List[Dict]:
         """
         Get all cars from multiple pages
+        
+        Args:
+            make: Car manufacturer
+            model: Car model (use format like "3 series" not "3-series")
+            postcode: UK postcode for search location
+            min_year: Minimum manufacturing year
+            max_year: Maximum manufacturing year
+            max_mileage: Maximum mileage
+            max_pages: Maximum number of pages to fetch (None for all)
+            
+        Returns:
+            List of car listings data
         """
         all_cars = []
         page = 1
         
-        # Add a blank line before scraping
-        print("")
-        # Just print "Scraping..." without car name
-        print(f"🔍 Scraping...", end="")
+        print(f"🔄 Scraping {make} {model}...", end="", flush=True)
         
         # If max_pages is None, keep scraping until there are no more results
         # Otherwise, respect the max_pages limit
@@ -377,14 +771,32 @@ class AutoTraderAPIClient:
             # Print a dot for each page fetched (on same line)
             print(".", end="", flush=True)
             
-            data = self.search_cars(make, model, postcode, min_year, max_year, max_mileage, page)
+            # Use the search_cars method with retry mechanism
+            try:
+                data = self.search_cars(
+                    make=make, 
+                    model=model, 
+                    postcode=postcode, 
+                    min_year=min_year, 
+                    max_year=max_year, 
+                    max_mileage=max_mileage, 
+                    page=page,
+                    max_retries=2  # Allow up to 2 retries for CloudFlare issues
+                )
+            except Exception as e:
+                print(f"\n❌ AutoTrader API access blocked by Cloudflare")
+                break
             
             if not data or len(data) == 0:
+                print(f"\n❌ No data returned from API on page {page}")
                 break
-                
+
             # Extract listings from the first response
-            search_results = data[0].get('data', {}).get('searchResults', {})
-            listings = search_results.get('listings', [])
+            if isinstance(data, list) and len(data) > 0:
+                search_results = data[0].get('data', {}).get('searchResults', {})
+                listings = search_results.get('listings', [])
+            else:
+                listings = []
             
             if not listings:
                 break
@@ -412,7 +824,6 @@ class AutoTraderAPIClient:
             # Increased delay between page requests to reduce detection risk
             time.sleep(random.uniform(0.5, 0.8))  # Balanced for both speed and stealthiness
         
-        # No found message needed - just finish the dots
         print()  # Print a newline after the dots
         
         return all_cars
@@ -566,6 +977,8 @@ def convert_api_car_to_deal(car_data: Dict) -> Dict:
             
             # Basic listing info
             'title': car_data.get('title', ''),
+            'subtitle': subtitle,  # Keep original subtitle
+            'spec': subtitle,  # Preserve original spec/subtitle unchanged
             'listing_type': car_data.get('type'),
             
             # Media

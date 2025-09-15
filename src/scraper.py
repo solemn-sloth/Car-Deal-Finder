@@ -15,12 +15,13 @@ from collections import defaultdict
 
 # Core scraping imports
 from services.network_requests import AutoTraderAPIClient
+from services.proxy_rotation import ProxyManager
 from services.data_adapter import NetworkDataAdapter
-from src.analyser import enhanced_analyse_listings, enhanced_keep_listing
+from src.ML_analyser import enhanced_analyse_listings, enhanced_keep_listing
 from config.config import TARGET_VEHICLES_BY_MAKE, VEHICLE_SEARCH_CRITERIA
 
 # Pipeline imports
-from services.storage import SupabaseStorage
+from src.storage import SupabaseStorage
 from services.notifications import DealNotificationPipeline
 
 
@@ -71,8 +72,27 @@ class SmartGroupingOrchestrator:
     """
     
     def __init__(self, connection_pool_size=10):
-        # Initialize API client with connection pooling
-        self.api_client = AutoTraderAPIClient(connection_pool_size=connection_pool_size, optimize_connection=True)
+        # Initialize proxy manager for Cloudflare bypass
+        proxy_manager = None
+        try:
+            import os
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config/proxies.json')
+            if os.path.exists(config_path):
+                proxy_manager = ProxyManager(config_path=config_path)
+                print("🔄 Proxy rotation enabled")
+            else:
+                print("⚠️ No proxy config found, proceeding without proxies")
+        except Exception as e:
+            print(f"⚠️ Failed to initialize proxy rotation: {e}")
+            proxy_manager = None
+        
+        # Initialize API client with connection pooling and proxy support
+        self.api_client = AutoTraderAPIClient(
+            connection_pool_size=connection_pool_size, 
+            optimize_connection=True, 
+            verify_ssl=False,
+            proxy_manager=proxy_manager
+        )
         self.session_data = {
             'start_time': datetime.now().isoformat(),
             'groups_processed': 0,
@@ -147,6 +167,8 @@ class SmartGroupingOrchestrator:
         
         try:
             # Make ONE API call for this make/model
+            print(f"🔍 Scraping {group.make} {group.model} from {group.search_criteria['year_from']}-{group.search_criteria['year_to']}, max_mileage: {group.search_criteria['maximum_mileage']}")
+            
             raw_vehicles = self.api_client.get_all_cars(
                 make=group.make,
                 model=group.model,
@@ -156,6 +178,7 @@ class SmartGroupingOrchestrator:
                 max_mileage=group.search_criteria['maximum_mileage'],
                 max_pages=None  # No limit - scrape all available cars
             )
+            print(f"📊 Found {len(raw_vehicles)} vehicles")
             
             self.session_data['total_api_calls'] += 1
             self.session_data['total_vehicles_scraped'] += len(raw_vehicles)
@@ -393,7 +416,7 @@ class SmartGroupingOrchestrator:
         
         return summary
     
-    def run_full_orchestration(self, max_groups: Optional[int] = None) -> Dict:
+    def run_full_orchestration(self, max_groups: Optional[int] = None, filter_make: Optional[str] = None, filter_model: Optional[str] = None) -> Dict:
         """
         Run the complete orchestration process for all or limited groups.
         
@@ -407,10 +430,27 @@ class SmartGroupingOrchestrator:
         print("                  🚀 Starting Car Dealer Bot")
         print("============================================================")
         
+        # Apply make/model filtering first
+        filtered_groups = self.groups
+        if filter_make or filter_model:
+            filtered_groups = []
+            for group in self.groups:
+                make_matches = not filter_make or group.make.lower() == filter_make.lower()
+                model_matches = not filter_model or group.model.lower() == filter_model.lower()
+                if make_matches and model_matches:
+                    filtered_groups.append(group)
+            
+            if not filtered_groups:
+                print(f"❌ No groups found matching make='{filter_make}' model='{filter_model}'")
+                return {'session_summary': {}, 'results': []}
+            else:
+                print(f"🎯 Filtering to {len(filtered_groups)} group(s): {filter_make} {filter_model}")
+        
+        # Apply max_groups limit
         if max_groups:
-            groups_to_process = self.groups[:max_groups]
+            groups_to_process = filtered_groups[:max_groups]
         else:
-            groups_to_process = self.groups
+            groups_to_process = filtered_groups
         
         results = []
         start_time = time.time()
@@ -444,7 +484,7 @@ class SmartGroupingOrchestrator:
 # Main Pipeline Orchestration
 # ────────────────────────────────────────────────────────────
 
-def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool_size=10):
+def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool_size=10, filter_make=None, filter_model=None):
     """
     Run the complete smart grouped scraping and notification pipeline.
     
@@ -458,7 +498,7 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
     start_time = datetime.now()
     
     try:
-        results = orchestrator.run_full_orchestration(max_groups=max_groups)
+        results = orchestrator.run_full_orchestration(max_groups=max_groups, filter_make=filter_make, filter_model=filter_model)
         
         # Compile all quality deals
         all_quality_deals = []
@@ -682,6 +722,8 @@ def main():
                        help='Test mode (no database storage or notifications)')
     parser.add_argument('--connection-pool-size', type=int, default=10,
                        help='Size of the connection pool for HTTP requests (default: 10)')
+    parser.add_argument('--make', type=str, help='Process only this make (e.g., Abarth)')
+    parser.add_argument('--model', type=str, help='Process only this model (e.g., 595)')
     
     args = parser.parse_args()
     
@@ -689,7 +731,9 @@ def main():
         results = run_smart_grouped_scraping(
             max_groups=args.max_groups,
             test_mode=args.test_mode,
-            connection_pool_size=args.connection_pool_size
+            connection_pool_size=args.connection_pool_size,
+            filter_make=args.make,
+            filter_model=args.model
         )
         
     except Exception as e:

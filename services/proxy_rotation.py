@@ -109,7 +109,8 @@ class ProxyManager:
                 proxy_url = f"http://{auth}@{ip}:{proxy['port']}" if auth else f"http://{ip}:{proxy['port']}"
                 
                 # Print the single line status message
-                print(f"IP Initialized: {ip}:{proxy['port']} ({proxy.get('country', 'Unknown')}) | Status: Working")
+                print(f"🌐 IP: {ip}:{proxy['port']} ({proxy.get('country', 'Unknown')}) ✅")
+                print()
                 
                 return proxy_url
                 
@@ -117,6 +118,42 @@ class ProxyManager:
             
         print("All proxies are blacklisted. Proceeding without proxy.")
         return None
+        
+    def get_proxy_for_worker(self, worker_id: int) -> Optional[str]:
+        """
+        Get a dedicated proxy for a specific worker.
+        Each worker gets a consistent IP to maintain session affinity.
+        
+        Args:
+            worker_id: Unique worker identifier (0-5 for 6 workers)
+            
+        Returns:
+            Formatted proxy URL or None if no proxies available
+        """
+        if not self.proxies:
+            return None
+            
+        # Find all available (non-blacklisted) proxies
+        available_proxies = [
+            p for p in self.proxies 
+            if not self.is_blacklisted(p['ip'])
+        ]
+        
+        if not available_proxies:
+            print("All proxies are blacklisted. Proceeding without proxy.")
+            return None
+            
+        # Assign proxy based on worker_id for consistency
+        # This ensures each worker gets the same IP across restarts
+        proxy_index = worker_id % len(available_proxies)
+        proxy = available_proxies[proxy_index]
+        
+        ip = proxy['ip']
+        auth = f"{proxy['username']}:{proxy['password']}" if 'username' in proxy and 'password' in proxy else ""
+        proxy_url = f"http://{auth}@{ip}:{proxy['port']}" if auth else f"http://{ip}:{proxy['port']}"
+        
+        # Quiet assignment - no print to maintain existing console aesthetics
+        return proxy_url
     
     def extract_ip(self, proxy_url: str) -> Optional[str]:
         """
