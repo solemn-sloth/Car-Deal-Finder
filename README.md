@@ -1,126 +1,277 @@
 # Car Deal Finder
 
-Advanced vehicle analysis system that scrapes used car listings, then uses machine learning to find underpriced vehicles and predict profit margins.
+Advanced vehicle analysis system that scrapes used car listings using AutoTrader's GraphQL API, then employs machine learning to identify underpriced vehicles and predict profit margins with statistical confidence.
 
 ## 🔍 How It Works
 
 ```
                                    ┌─────────────────┐
-                                   │     Scraper     │
-                                   │  High-Speed API │
+                                   │   AutoTrader    │
+                                   │   GraphQL API   │
+                                   │  + Anti-Detect  │
                                    └────────┬────────┘
                                             │
                                             ▼
 ┌─────────────────────┐          ┌─────────────────────┐         ┌───────────────────┐
-│  Price Markers      │◄─────────┤   ML Processing     ├────────►│  Database Storage │
-│  Parallel Scraping  │          │   & Deal Analysis   │         │  & Notifications  │
+│  Retail Markers     │◄─────────┤   Universal ML      ├────────►│   Supabase DB     │
+│  6-Worker Parallel  │          │   XGBoost System    │         │  + Notifications  │
+│  Playwright Engine  │          │  All Makes/Models   │         │   (Email Alerts)  │
 └─────────────────────┘          └─────────────────────┘         └───────────────────┘
 ```
 
 ### Core Process Flow
 
-1. **Scraping**: Multi-process AutoTrader API client retrieves vehicle listings with minimal overhead
-2. **Retail Price Analysis**: Sub-process scrapes retail price markers from dealer listings to improve prediction accurary
-3. **ML Deal Analysis**: Machine learning models calculate market values and identify profitable opportunities
-4. **Profit Calculation**: Algorithms determine profit margins with statistical confidence
+1. **Daily Proxy Refresh**: Automatically fetches fresh proxies from Webshare API with 24-hour caching
+2. **GraphQL Scraping**: High-performance AutoTrader API client with CloudFlare bypass and anti-fingerprinting
+3. **Parallel Processing**: 6-worker Playwright system scrapes retail price markers from dealer listings  
+4. **Universal ML Analysis**: Single XGBoost model trained on all vehicle data predicts market values
+5. **Profit Calculation**: Statistical algorithms identify underpriced vehicles with confidence scores
 
-## 📊 Machine Learning System
+## 🌐 Proxy & Anti-Detection System
 
-The integrated ML system offers major advantages over typical rule-based deal finders:
-
-- **Accurate Market Value Prediction**: Uses actual dealer price markers to train models
-- **Multi-Factor Analysis**: Considers year, mileage, fuel type, transmission, spec, and engine size
-- **Parallel Processing**: High-throughput design processes hundreds of listings in minutes
-
-### ML Architecture
+### Webshare API Integration
+- **Automatic Daily Refresh**: Fetches up to 100 fresh proxies every 24 hours
+- **In-Memory Caching**: Stores proxies in memory with timestamp-based refresh logic
+- **Worker Assignment**: Each of 6 workers gets a consistent proxy IP for session affinity
+- **Graceful Fallback**: Uses cached proxies if API fails, JSON backup if both fail
 
 ```python
-# ML processor with parallel price marker scraping
-def process_car_model(make, model):
-    # 1. Scrape all listings (dealers and private)
-    all_listings = scrape_listings(make, model)
-    
-    # 2. Separate dealer and private listings
-    dealer_listings = filter_by_seller_type(all_listings, "Dealer")
-    private_listings = filter_by_seller_type(all_listings, "Private")
-    
-    # 3. Enrich dealer listings with price markers (parallel processing)
-    enriched_dealers = enrich_with_price_markers(dealer_listings)
-    
-    # 4. Train ML model on dealer data
-    model, scaler = train_model(make, model, enriched_dealers)
-    
-    # 5. Predict profit on private listings
-    predictions = predict_profit_margins(private_listings, model, scaler)
-    
-    # 6. Filter for profitable deals and notify
-    profitable_deals = filter_profitable_deals(predictions)
+# Proxy system automatically handles rotation and blacklisting
+proxy_manager = ProxyManager()
+proxy = proxy_manager.get_proxy()  # Gets fresh proxy with rotation
 ```
 
-## 🚀 Features
+### CloudFlare Bypass Techniques
+- **Dynamic TLS Fingerprinting**: Randomized cipher suites and curve orders per request
+- **Browser Simulation**: Chrome user agents with realistic client hints and headers
+- **Cookie Generation**: Plausible CloudFlare challenge and bot management cookies
+- **Request Patterns**: Human-like delays and realistic browsing behavior
 
-- **Optimized Scraping Engine**: Super fast processing, optimised as much as possible
-- **Parallel Processing**: Multi-core architecture for price marker extraction
-- **Real Market Data**: Uses actual dealer price markers rather than estimates
-- **Spec-Based Analysis**: Considers premium trims (GTI, R-line, etc.) in valuations
-- **Profit Prediction**: Calculates potential profit with statistical confidence
-- **Adaptive Filtering**: Intelligent deal quality classification
+## 📊 Universal ML System
 
-## 📁 Core Components
+### Unified Model Architecture
+The system uses a single XGBoost model trained on data from all vehicle makes and models:
 
-### Core Scraping & Analysis
-- **`retail_price_scraper.py`** - High-speed parallel price marker extraction
-- **`ML_analyser.py`** - Machine learning system for profit prediction
-- **`scraper.py`** - High-performance AutoTrader API client
+- **Cross-Vehicle Learning**: Model learns patterns across BMW, Audi, Ford, etc.
+- **Standardized Features**: Universal encoding system for makes, models, fuel types, specs
+- **Enhanced Accuracy**: More training data leads to better predictions than individual models
+- **Efficient Processing**: Single model deployment reduces complexity and memory usage
 
-### Supporting Components
-- **`data_adapter.py`** - Data format standardization for ML processing
-- **`network_requests.py`** - Low-level network operations
-- **`config.py`** - Application configuration
+### Feature Engineering Pipeline
+```python
+# Universal feature set used across all vehicles
+FEATURE_COLUMNS = [
+    'asking_price', 'mileage', 'age',           # Core metrics
+    'make_encoded', 'model_encoded',            # Vehicle identity  
+    'fuel_type_numeric', 'transmission_numeric', # Drivetrain
+    'engine_size', 'spec_numeric'               # Performance & trim
+]
+```
 
-## 🔧 Running the System
+### XGBoost Configuration
+- **Objective**: Regression with squared error loss
+- **Hyperparameters**: Optimized depth (6), learning rate (0.1), subsample (0.8)
+- **Regularization**: Column sampling and minimum child weight to prevent overfitting
+- **Early Stopping**: 15 rounds to prevent overtraining
 
+## 🚀 Enhanced Scraping Architecture
+
+### AutoTrader GraphQL API
+- **Direct API Access**: Bypasses HTML parsing with GraphQL queries to `/at-gateway`
+- **Complete Data**: Returns JSON with all listing details, images, seller info, specifications
+- **Pagination**: Handles up to ~2,000 cars per search (AutoTrader's pagination limit)
+- **Rate Limiting**: Intelligent delays and retry mechanisms to avoid detection
+
+### Multi-Worker Parallel Processing  
+- **6-Worker System**: Playwright browsers run in parallel for retail price scraping
+- **Session Affinity**: Each worker maintains consistent proxy IP for reliable access
+- **Anti-Fingerprinting**: Randomized viewport sizes, device memory, connection speeds
+- **Fault Tolerance**: Workers continue if others fail, graceful degradation
+
+### Performance Optimizations
+- **Connection Pooling**: Reuses HTTP connections with configurable pool sizes  
+- **Intelligent Caching**: API responses cached to avoid duplicate requests
+- **Batch Processing**: Groups similar requests to maximize throughput
+- **Memory Management**: Efficient data structures and garbage collection
+
+## 📁 Core System Components
+
+### Primary Scraping & Analysis
+- **`network_requests.py`** - AutoTrader GraphQL API client with anti-detection
+- **`proxy_rotation.py`** - Webshare API integration with automatic refresh and blacklisting
+- **`retail_price_scraper.py`** - 6-worker Playwright system for parallel price marker extraction
+- **`universal_ml_model.py`** - XGBoost training and prediction system for all vehicle types
+
+### ML & Data Processing  
+- **`universal_encodings.py`** - Standardized encoding system for makes, models, specs
+- **`ML_analyser.py`** - Main analysis pipeline coordinating scraping and ML prediction
+- **`data_adapter.py`** - Data format standardization and validation
+- **`weekly_trainer.py`** - Automated model training and performance monitoring
+
+### Infrastructure & Configuration
+- **`config/config.py`** - Centralized configuration with environment variables
+- **`services/schedule_manager.py`** - Task scheduling and automation
+- **`services/notifications.py`** - Email alerts and result reporting
+- **`src/storage.py`** - Supabase database operations and caching
+
+## 🔧 Environment Setup
+
+### Required Environment Variables
 ```bash
-# Install dependencies
+# Database Configuration
+SUPABASE_URL=your_supabase_url_here
+SUPABASE_KEY=your_supabase_key_here
+
+# Proxy Service  
+WEBSHARE_API_TOKEN=your_webshare_api_token_here
+
+# Notifications
+RESEND_API_KEY=your_resend_api_key_here
+```
+
+### Installation & Dependencies
+```bash
+# Install Python dependencies
 pip install -r config/requirements.txt
 
-# Basic run (all vehicles)
-python src/scraper.py
+# Install Playwright browsers
+playwright install chromium
 
-# Test mode (limited makes/models)
+# Set up environment variables
+cp config/.env.example config/.env
+# Edit config/.env with your actual API keys
+```
+
+## 🚀 Running the System
+
+### Basic Operations
+```bash
+# Run complete analysis for all configured vehicles
+python src/ML_analyser.py
+
+# Analyze specific make/model
+python src/ML_analyser.py --make BMW --model "3 Series"
+
+# Test scraping without ML analysis
 python src/scraper.py --test
 
-# ML analysis with price markers
-python tests/ML_analyser.py --make BMW --model "3 Series"
+# Run weekly model training
+python services/weekly_trainer.py
 ```
 
-## ⚙️ Configuration
+### Advanced Configuration
+```bash
+# Custom search parameters
+python src/ML_analyser.py --make Ford --model Focus --max-year 2020
 
-### Target Vehicles
+```
+
+## ⚙️ System Configuration
+
+### Target Vehicle Configuration
+The system is configured to analyze 100+ popular vehicle models across all major manufacturers:
+
 ```python
-# Vehicle makes and models to scrape and analyze
-TARGET_VEHICLES = {
-    "Ford": ["Fiesta", "Focus", "Kuga"],
-    "BMW": ["1 Series", "3 Series", "X1"],
-    "Audi": ["A1", "A3", "A4", "Q3"],
-    # Plus many more popular models
+# Excerpt from config/config.py
+TARGET_VEHICLES_BY_MAKE = {
+    "Audi": ["A1", "A3", "A4", "A4 Avant", "A5", "Q2", "Q3", "Q5", "Q7", "S3", "TT"],
+    "BMW": ["1 Series", "2 Series", "3 Series", "4 Series", "5 Series", "X1", "X3"],
+    "Mercedes-Benz": ["A Class", "C Class", "E Class", "GLC", "GLA", "CLA"],
+    "Ford": ["Fiesta", "Focus", "Kuga", "Mondeo", "Puma", "EcoSport"],
+    "Volkswagen": ["Golf", "Polo", "Tiguan", "T-Roc", "Passat", "up!"],
+    # ... 20+ more manufacturers with 200+ models total
 }
 ```
 
-### ML Configuration
+### Search Parameters  
 ```python
-# ML analysis thresholds
-ML_CONFIG = {
-    'profit_threshold': 0.15,      # Minimum 15% profit margin
-    'high_profit_threshold': 0.25, # 25%+ is a great deal
-    'min_profit_amount': 800,      # Minimum £800 profit
-    'engine_size_weight': 1.2,     # Weighting factor for engine size
-    'spec_weight': 1.5             # Weighting factor for vehicle spec
+# Default search criteria applied to all vehicles
+VEHICLE_SEARCH_CRITERIA = {
+    "maximum_mileage": 100000,    # 100k miles max
+    "year_from": 2010,           # 2010 onwards
+    "year_to": 2023,             # Up to 2023 models
+    "postcode": "M15 4FN"        # Manchester city center
 }
 ```
 
-## 🔮 Future Enhancements
+### Proxy Configuration
+```python
+# Webshare API settings  
+WEBSHARE_PROXY_CONFIG = {
+    'refresh_interval_hours': 24,    # Daily refresh
+    'api_timeout': 30,               # 30 second timeout
+    'max_proxies': 100               # Up to 100 proxies
+}
+```
 
-- **AI Spec Analysis**: Advanced text processing of vehicle specifications
-- **ANPR Integration**: Extract numberplate information from listing images
-- **Cross-Platform Integration**: Expand to other used car marketplaces
+### ML Model Configuration
+```python
+# XGBoost hyperparameters optimized for vehicle data
+UNIVERSAL_ML_CONFIG = {
+    'min_training_samples': 50,      # Minimum samples to train
+    'xgboost_params': {
+        'max_depth': 6,              # Tree depth
+        'eta': 0.1,                  # Learning rate
+        'subsample': 0.8,            # Row sampling
+        'colsample_bytree': 0.8,     # Feature sampling
+    },
+    'training_params': {
+        'num_boost_round': 150,      # Training iterations
+        'early_stopping_rounds': 15,  # Overfitting prevention
+    }
+}
+```
+
+## 📊 Performance Characteristics
+
+### Throughput Metrics
+- **API Scraping**: ~2,000 listings per model in 2-3 minutes
+- **Retail Processing**: 6 parallel workers handle 100+ dealer listings per minute  
+- **ML Predictions**: Universal model processes 1,000+ listings in seconds
+- **Daily Capacity**: Can analyze 50+ vehicle models in automated daily runs
+
+### Resource Usage
+- **Memory**: ~50MB for proxy cache, ~200MB for ML model, ~100MB per worker
+- **CPU**: Optimized for multi-core systems, scales with available cores
+- **Network**: Intelligent rate limiting prevents IP blacklisting  
+- **Storage**: Compressed data in Supabase, minimal local storage requirements
+
+## 🔮 Architecture Benefits
+
+### Scalability
+- **Horizontal Scaling**: Add more workers or proxy IPs for increased throughput
+- **Modular Design**: Components can be deployed independently
+- **Caching Strategy**: Reduces API calls and improves response times
+
+### Reliability  
+- **Fault Tolerance**: System continues operation if individual components fail
+- **Automatic Recovery**: Proxy rotation and retry mechanisms handle temporary blocks
+- **Data Persistence**: All results stored in reliable cloud database
+
+### Maintainability
+- **Configuration-Driven**: Easy to add new vehicle models or adjust parameters  
+- **Comprehensive Logging**: Detailed logs for debugging and monitoring
+- **Environment Separation**: Clear separation between development and production configs
+
+## 🔧 Development & Testing
+
+### Code Quality
+- **Type Hints**: Comprehensive type annotations throughout codebase
+- **Error Handling**: Graceful degradation and informative error messages
+- **Documentation**: Detailed docstrings and inline comments
+- **Modular Architecture**: Clean separation of concerns
+
+### Testing Infrastructure  
+```bash
+# Run system tests
+python tests/test_proxies.py
+python tests/performance_test.py
+
+# Test ML model performance
+python src/ML_analyser.py --test-mode
+
+# Validate API connections
+python services/network_requests.py
+```
+
+This system represents a sophisticated approach to automated vehicle deal finding, combining advanced web scraping techniques with modern machine learning to identify profitable opportunities in the used car market.

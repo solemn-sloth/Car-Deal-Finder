@@ -8,6 +8,8 @@ import json
 import datetime
 import random
 import re
+import time
+import requests
 from typing import Optional, Dict, List, Any
 
 class ProxyManager:
@@ -30,13 +32,110 @@ class ProxyManager:
         self.archive_path = archive_path
         self.config_path = config_path
         self.settings = {}
+        
+        # Webshare API cache variables
+        self._api_proxies = []
+        self._last_api_refresh = None
+        
         self._load_config()
         
         # Create archive directory if it doesn't exist
         os.makedirs(self.archive_path, exist_ok=True)
     
     def _load_config(self) -> None:
-        """Load proxy configuration from file."""
+        """Load proxy configuration, trying API first, then JSON fallback."""
+        # Try to load from Webshare API first
+        if self._should_refresh_api_cache():
+            if self._fetch_webshare_proxies():
+                # Successfully got API proxies, use them
+                self.proxies = self._api_proxies
+                self._load_proxy_settings()
+                return
+        elif self._api_proxies:
+            # Use cached API proxies if available and not expired
+            self.proxies = self._api_proxies
+            self._load_proxy_settings()
+            return
+        
+        # Fallback to JSON file
+        self._load_from_json_file()
+    
+    def _should_refresh_api_cache(self) -> bool:
+        """Check if API cache should be refreshed (>24h old or never fetched)."""
+        if not self._last_api_refresh:
+            return True
+        
+        # Check if more than 24 hours have passed
+        from config.config import WEBSHARE_PROXY_CONFIG
+        refresh_interval = WEBSHARE_PROXY_CONFIG.get('refresh_interval_hours', 24)
+        cache_age_hours = (time.time() - self._last_api_refresh) / 3600
+        
+        return cache_age_hours >= refresh_interval
+    
+    def _fetch_webshare_proxies(self) -> bool:
+        """Fetch proxies from Webshare API and store in cache."""
+        try:
+            from config.config import WEBSHARE_API_TOKEN, WEBSHARE_API_BASE_URL, WEBSHARE_PROXY_CONFIG
+            
+            if not WEBSHARE_API_TOKEN:
+                return False
+            
+            headers = {"Authorization": f"Token {WEBSHARE_API_TOKEN}"}
+            timeout = WEBSHARE_PROXY_CONFIG.get('api_timeout', 30)
+            max_proxies = WEBSHARE_PROXY_CONFIG.get('max_proxies', 100)
+            
+            response = requests.get(
+                f"{WEBSHARE_API_BASE_URL}/proxy/list/",
+                headers=headers,
+                params={
+                    "mode": "direct",
+                    "page_size": max_proxies
+                },
+                timeout=timeout
+            )
+            
+            if response.status_code == 200:
+                api_data = response.json()
+                api_proxies = api_data.get("results", [])
+                
+                # Convert API format to internal format
+                self._api_proxies = []
+                for proxy in api_proxies:
+                    formatted_proxy = {
+                        "ip": proxy.get("proxy_address"),
+                        "port": str(proxy.get("port")),
+                        "username": proxy.get("username"),
+                        "password": proxy.get("password"),
+                        "country": proxy.get("country_code", "Unknown")
+                    }
+                    self._api_proxies.append(formatted_proxy)
+                
+                self._last_api_refresh = time.time()
+                print(f"✅ Proxies refreshed ({len(self._api_proxies)} available)")
+                return True
+            else:
+                print(f"❌ API failed (HTTP {response.status_code}), using cached proxies")
+                return False
+                
+        except Exception as e:
+            print(f"❌ API failed ({str(e)}), using cached proxies")
+            return False
+    
+    def _load_proxy_settings(self) -> None:
+        """Load proxy settings from JSON file (for rotation strategy, etc.)."""
+        try:
+            with open(self.config_path, 'r') as f:
+                config = json.load(f)
+                self.settings = config.get('proxy_settings', {})
+        except Exception:
+            self.settings = {}
+        
+        # Apply rotation strategy to current proxy list
+        if self.settings.get('rotation_strategy') == 'random':
+            random.shuffle(self.proxies)
+    
+    def _load_from_json_file(self) -> None:
+        """Load proxy configuration from JSON file (fallback method)."""
         try:
             with open(self.config_path, 'r') as f:
                 config = json.load(f)

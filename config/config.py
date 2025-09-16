@@ -18,6 +18,15 @@ CAR_DEALS_TABLE = os.getenv('CAR_DEALS_TABLE', 'car_deals')
 # Application Configuration
 DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
 
+# Webshare Proxy API Configuration
+WEBSHARE_API_TOKEN = os.getenv('WEBSHARE_API_TOKEN') or os.getenv('WEBSHARE_API_KEY')
+WEBSHARE_API_BASE_URL = "https://proxy.webshare.io/api/v2"
+WEBSHARE_PROXY_CONFIG = {
+    'refresh_interval_hours': int(os.getenv('PROXY_REFRESH_INTERVAL_HOURS', '24')),  # Hours between API refresh
+    'api_timeout': int(os.getenv('WEBSHARE_API_TIMEOUT', '30')),  # API request timeout in seconds
+    'max_proxies': int(os.getenv('MAX_PROXIES', '100'))  # Maximum number of proxies to fetch
+}
+
 # Weekly Retail Scraping Configuration
 WEEKLY_RETAIL_SCRAPING = {
     'interval_days': int(os.getenv('RETAIL_SCRAPING_INTERVAL_DAYS', '7')),  # Days between retail scraping runs
