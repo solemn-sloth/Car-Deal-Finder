@@ -26,7 +26,7 @@ class WorkerCoordinator:
     Enhanced worker coordinator for sequential URL distribution and anti-detection.
     Manages 6 workers with unique IPs and fingerprints, global rate limiting.
     """
-    def __init__(self, target_rate_per_minute=300, max_workers=6):
+    def __init__(self, target_rate_per_minute=300, max_workers=7):
         self.target_rate_per_minute = target_rate_per_minute
         self.max_workers = max_workers
         self.work_queue = queue.Queue()
@@ -44,15 +44,15 @@ class WorkerCoordinator:
         for url in urls:
             self.work_queue.put(url)
             
-    def get_next_work(self, worker_id):
+    def get_next_work(self, worker_id, timeout=1):
         """Get next URL for worker, respecting rate limits and worker health."""
         if worker_id in self.failed_workers:
             return None
             
         try:
-            # No global rate limiting - let workers run at full speed
-            # Each worker will handle its own pacing internally
-            return self.work_queue.get_nowait()
+            # Use blocking get with timeout for proper parallel processing
+            # Workers will wait briefly for new work, enabling true parallelism
+            return self.work_queue.get(timeout=timeout)
         except queue.Empty:
             return None
             
@@ -69,6 +69,9 @@ class WorkerCoordinator:
             if self._is_worker_detected(result):
                 self.failed_workers.add(worker_id)
                 logger.debug(f"Worker {worker_id} detected as blocked, pausing")
+        
+        # Mark the task as done in the queue
+        self.work_queue.task_done()
                 
     def _get_result_status(self, result):
         """Get detailed status icon and text for result."""
@@ -218,7 +221,7 @@ def human_mouse_movement(width=None, height=None):
 
 def human_delay():
     """Add human-like delays between actions"""
-    time.sleep(random.uniform(0.8, 2.5))
+    time.sleep(random.uniform(0.2, 0.5))
 
 class BrowserManager:
     """Manages a persistent browser instance for reuse across multiple scraping operations"""
@@ -230,6 +233,7 @@ class BrowserManager:
         self.browser = None
         self.context = None
         self.shared_session_data = shared_session_data or {}  # For cross-worker session sharing
+        self.cookies_handled = False  # Track if cookies have been handled for this session
         # Generate realistic, recent user agents dynamically
         self.user_agents = self._generate_realistic_user_agents()
         self._initialize_browser()
@@ -357,10 +361,10 @@ class BrowserManager:
         self.context = self.browser.new_context(**context_options)
         
         # Set default timeout - reduced for better performance
-        self.context.set_default_timeout(5000)  # 5 seconds default timeout
+        self.context.set_default_timeout(2000)  # 2 seconds default timeout
         
         # Set default navigation waiting options
-        self.context.set_default_navigation_timeout(8000)  # 8 seconds for navigation
+        self.context.set_default_navigation_timeout(4000)  # 4 seconds for navigation
         
         # Manual stealth JavaScript replaced by playwright-stealth
     
@@ -397,6 +401,20 @@ class BrowserManager:
             human_mouse_movement()  # Fallback to screen size
         
         return page
+    
+    def handle_cookies_once(self, page):
+        """Handle cookies once per browser session on the first real page load."""
+        if not self.cookies_handled:
+            # Navigate to AutoTrader homepage to handle cookies once
+            try:
+                page.goto('https://www.autotrader.co.uk/', wait_until='domcontentloaded', timeout=5000)
+                handle_cookie_popup(page)
+                self.cookies_handled = True
+                logger.debug("Cookies handled once for this browser session")
+            except Exception as e:
+                logger.debug(f"Cookie handling failed: {e}")
+                # Continue anyway, mark as handled to avoid retrying
+                self.cookies_handled = True
     
     def close(self):
         """Close the browser and context"""
@@ -540,8 +558,8 @@ class EnhancedBrowserManager(BrowserManager):
                     }
         
         self.context = self.browser.new_context(**context_options)
-        self.context.set_default_timeout(5000)
-        self.context.set_default_navigation_timeout(8000)
+        self.context.set_default_timeout(2000)
+        self.context.set_default_navigation_timeout(4000)
 
 
 def setup_browser(playwright, headless=True):
@@ -608,8 +626,8 @@ def setup_browser(playwright, headless=True):
     )
     
     # Set default timeouts - reduced for better performance
-    context.set_default_timeout(5000)  # 5 seconds
-    context.set_default_navigation_timeout(8000)  # 8 seconds
+    context.set_default_timeout(2000)  # 2 seconds
+    context.set_default_navigation_timeout(4000)  # 4 seconds
     
     return browser, context
 
@@ -617,23 +635,23 @@ def handle_cookie_popup(page):
     """Simple and fast cookie popup handling"""
     # Quick 2-second check for cookie popup
     try:
-        # Look for cookie popup with a short timeout
-        cookie_element = page.wait_for_selector('#notice button.sp_choice_type_11', timeout=2000)
+        # Look for cookie popup with a very short timeout
+        cookie_element = page.wait_for_selector('#notice button.sp_choice_type_11', timeout=200)
         if cookie_element and cookie_element.is_visible():
             # Found cookie popup - try keyboard shortcut first
             try:
                 # Press Tab 11 times to reach Accept All button (last-focusable-el)
                 for _ in range(11):
                     page.keyboard.press('Tab')
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(50)
                 page.keyboard.press('Enter') 
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(100)
                 return True
             except:
                 # Keyboard failed, try one simple click
                 try:
                     cookie_element.click(timeout=1000)
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(100)
                     return True
                 except:
                     pass
@@ -1104,9 +1122,7 @@ def _multiprocessing_worker(url_batch_with_params):
                         'marker_text': marker_text or 'No market marker found'
                     }
                     
-                    # Add small delay between URLs unless in test mode
-                    if not test_mode_flag and i < len(url_batch) - 1:
-                        human_delay()
+                    # Rate limiting handled by main worker thread, no additional delay needed here
                         
                 except Exception as e:
                     batch_results[url] = {
@@ -1145,9 +1161,9 @@ def batch_scrape_price_markers_optimized(urls, headless=True, progress_callback=
         Dict mapping URLs to scraping results
     """
     total_urls = len(urls)
-    max_workers = 6
+    max_workers = 7
     
-    logger.info(f"🚀 Starting enhanced orchestration with 6 workers")
+    logger.info(f"🚀 Starting enhanced orchestration with 7 workers")
     logger.info(f"📊 Processing {total_urls} URLs with browser reuse every {urls_per_browser_cycle} URLs")
     
     # Initialize proxy manager for worker-specific IPs
@@ -1179,17 +1195,37 @@ def batch_scrape_price_markers_optimized(urls, headless=True, progress_callback=
                 )
                 page = browser_manager.get_page()
                 
-                # Process URLs sequentially from coordinator
+                # Handle cookies once for this browser session
+                browser_manager.handle_cookies_once(page)
+                
+                # Process URLs in parallel from coordinator
                 urls_processed = 0
-                while not coordinator.is_work_complete() and urls_processed < urls_per_browser_cycle:
-                    url = coordinator.get_next_work(worker_id)
+                consecutive_empty_gets = 0
+                
+                while urls_processed < urls_per_browser_cycle:
+                    url = coordinator.get_next_work(worker_id, timeout=0.2)
                     if url is None:
-                        break
+                        consecutive_empty_gets += 1
+                        # If we've tried and gotten no work, probably done
+                        if consecutive_empty_gets >= 1:
+                            break
+                        continue
+                    
+                    consecutive_empty_gets = 0  # Reset counter when we get work
                         
                     try:
-                        # Scrape price marker for this URL
-                        result = _scrape_single_url(page, url, test_mode)
+                        # Use longer timeout for first URL (cold start), shorter for subsequent
+                        is_first_url = (urls_processed == 0)
+                        navigation_timeout = 10000 if is_first_url else 5000
+                        
+                        # Log worker activity for parallel verification
+                        logger.debug(f"Worker {worker_id} starting URL {urls_processed+1}: {url[-30:]}")
+                        
+                        # Scrape price marker for this URL (skip cookies since handled once)
+                        result = _scrape_single_url(page, url, test_mode, navigation_timeout, skip_cookies=True)
                         coordinator.report_result(url, result, worker_id)
+                        
+                        logger.debug(f"Worker {worker_id} completed URL {urls_processed+1} - Status: {coordinator.last_result_status}")
                         
                         # Update progress callback with status
                         if progress_callback:
@@ -1197,9 +1233,9 @@ def batch_scrape_price_markers_optimized(urls, headless=True, progress_callback=
                             
                         urls_processed += 1
                         
-                        # Per-worker rate limiting: 50 URLs/min per worker = 300 total (only if not in test mode)
+                        # Per-worker rate limiting: aggressive pacing targeting 300 URLs/min (only if not in test mode)
                         if not test_mode:
-                            time.sleep(random.uniform(0.5, 1.4))  # Proper pacing for human-like browsing
+                            time.sleep(random.uniform(0.05, 0.15))  # Aggressive pacing for high throughput
                         
                     except Exception as e:
                         error_result = {
@@ -1221,11 +1257,9 @@ def batch_scrape_price_markers_optimized(urls, headless=True, progress_callback=
     
     # Start all workers with minimal staggered initialization
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit workers with minimal stagger (1 second delays)
+        # Submit all workers immediately (no stagger needed)
         futures = []
         for worker_id in range(max_workers):
-            if worker_id > 0:
-                time.sleep(1)  # Minimal stagger to avoid simultaneous starts
             future = executor.submit(enhanced_worker_thread, worker_id)
             futures.append(future)
         
@@ -1240,11 +1274,18 @@ def batch_scrape_price_markers_optimized(urls, headless=True, progress_callback=
     return coordinator.results
 
 
-def _scrape_single_url(page, url, test_mode=False):
+def _scrape_single_url(page, url, test_mode=False, navigation_timeout=5000, skip_cookies=True):
     """Helper function to scrape a single URL using existing page."""
+    import time
+    start_time = time.time()
+    nav_time = 0
+    element_time = 0
+    
     try:
         # Navigate to the page with detailed error tracking
-        page.goto(url, wait_until='domcontentloaded', timeout=15000)
+        nav_start = time.time()
+        page.goto(url, wait_until='domcontentloaded', timeout=navigation_timeout)
+        nav_time = time.time() - nav_start
         
         # Check for common blocking/error pages
         page_title = page.title().lower()
@@ -1289,16 +1330,17 @@ def _scrape_single_url(page, url, test_mode=False):
                 'marker_text': f'Navigation Error: {str(nav_error)[:30]}'
             }
     
-    # Handle cookie popup with error tracking
-    try:
-        cookie_result = handle_cookie_popup(page)
-        # Note: handle_cookie_popup doesn't return meaningful status, so we'll assume success
-    except Exception as cookie_error:
-        return {
-            'price': 0,
-            'market_difference': 0,
-            'marker_text': f'Cookie Error: {str(cookie_error)[:40]}'
-        }
+    # Handle cookie popup with error tracking (skip if already handled)
+    if not skip_cookies:
+        try:
+            cookie_result = handle_cookie_popup(page)
+            # Note: handle_cookie_popup doesn't return meaningful status, so we'll assume success
+        except Exception as cookie_error:
+            return {
+                'price': 0,
+                'market_difference': 0,
+                'marker_text': f'Cookie Error: {str(cookie_error)[:40]}'
+            }
     
     # Simple, reliable price marker detection with detailed error tracking
     marker_found = False
@@ -1307,7 +1349,9 @@ def _scrape_single_url(page, url, test_mode=False):
     
     try:
         # Single selector for all market average scenarios
-        element = page.wait_for_selector('button:has-text("market average")', timeout=2000, state='attached')
+        element_start = time.time()
+        element = page.wait_for_selector('button:has-text("market average")', timeout=1000, state='attached')
+        element_time = time.time() - element_start
         
         if element:
             if element.is_visible():
@@ -1319,8 +1363,9 @@ def _scrape_single_url(page, url, test_mode=False):
                 element_error = "Button found but not visible"
         else:
             element_error = "Button element not found"
-            
+        element_time = time.time() - element_start    
     except Exception as e:
+        element_time = time.time() - element_start
         error_msg = str(e).lower()
         if "timeout" in error_msg:
             # Debug timeout cases - gather detailed page state info
@@ -1423,6 +1468,10 @@ def _scrape_single_url(page, url, test_mode=False):
             market_difference = 1
         elif 'below market average' in marker_text.lower():
             market_difference = -1
+    
+    # Log timing breakdown (will be enhanced with worker ID by caller)
+    total_time = time.time() - start_time
+    logger.debug(f"URL timing - Total: {total_time:.2f}s | Nav: {nav_time:.2f}s | Element: {element_time:.2f}s | URL: {url[-30:]}")
     
     # Return with detailed status
     if marker_found and marker_text:
