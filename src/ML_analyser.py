@@ -40,6 +40,13 @@ from services.retail_price_scraper import scrape_price_marker, batch_scrape_pric
 from services.network_requests import AutoTraderAPIClient
 from services.data_adapter import NetworkDataAdapter
 
+# Import universal ML model components
+from services.universal_ml_model import (
+    load_universal_model, predict_with_universal_model, 
+    is_universal_model_available, get_universal_model_info
+)
+from services.schedule_manager import is_retail_scraping_due
+
 # Project paths - everything goes to archive folder
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHIVE_PATH = os.path.join(PROJECT_ROOT, 'archive')
@@ -1228,7 +1235,7 @@ def alert_buyer(profitable_deals: pd.DataFrame, make: str, model: str = None) ->
 
 # Main Workflow Function
 def process_car_model(make: str, model: str = None, max_pages: int = None, verify_ssl: bool = False) -> None:
-    """Process a specific car make/model to find profitable deals
+    """Process a specific car make/model to find profitable deals using universal model
     
     Args:
         make: Car manufacturer (e.g., 'bmw')
@@ -1238,7 +1245,95 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
     """
     global EXECUTION_MODE
     
-    # Clean header already printed in main(), so skip it here
+    # Check if weekly retail scraping is due
+    if is_retail_scraping_due():
+        logger.info("🔄 Weekly retail scraping is due - running full training process...")
+        from services.weekly_trainer import run_weekly_training  # Import locally to avoid circular import
+        training_success = run_weekly_training(
+            max_pages_per_model=max_pages,
+            verify_ssl=verify_ssl,
+            test_mode=(EXECUTION_MODE == "test")
+        )
+        
+        if not training_success:
+            logger.error("❌ Weekly training failed - falling back to individual model processing")
+            # Fall back to original individual model approach
+            _process_individual_model(make, model, max_pages, verify_ssl)
+            return
+    
+    # Load universal model for daily operations
+    if not is_universal_model_available():
+        logger.warning("⚠️ No universal model available - running weekly training first...")
+        from services.weekly_trainer import run_weekly_training  # Import locally to avoid circular import
+        training_success = run_weekly_training(
+            max_pages_per_model=max_pages,
+            verify_ssl=verify_ssl,
+            test_mode=(EXECUTION_MODE == "test")
+        )
+        
+        if not training_success:
+            logger.error("❌ Training failed - falling back to individual model processing")
+            _process_individual_model(make, model, max_pages, verify_ssl)
+            return
+    
+    # Load the universal model
+    if not load_universal_model():
+        logger.error("❌ Failed to load universal model - falling back to individual processing")
+        _process_individual_model(make, model, max_pages, verify_ssl)
+        return
+    
+    # Step 1: Scrape private listings only (minimal proxy usage for daily operations)
+    logger.info(f"🔍 Scraping private listings for {make} {model or 'All Models'} (universal model mode)")
+    all_listings = scrape_listings(make, model, max_pages, use_cache=True, verify_ssl=verify_ssl, use_proxy=True)
+    
+    if not all_listings:
+        print(f"📊 Results: 0 listings found")
+        print()
+        print(f"❌ Error: No listings found for {make} {model or 'All Models'}")
+        return
+    
+    # Step 2: Filter for private listings only (dealers already processed in weekly training)
+    private_listings = filter_listings_by_seller_type(all_listings, "Private")
+    
+    if len(private_listings) == 0:
+        logger.warning(f"No private listings found for {make} {model or 'all'}")
+        return
+    
+    logger.info(f"📋 Found {len(private_listings)} private listings for analysis")
+    
+    # Step 3: Use universal model to predict market values
+    logger.info(f"🤖 Predicting market values using universal model...")
+    predictions_df = predict_with_universal_model(private_listings)
+    
+    if predictions_df.empty:
+        logger.error("❌ Universal model prediction failed")
+        return
+    
+    # Step 4: Filter for profitable deals
+    profitable_deals = filter_profitable_deals(predictions_df)
+    
+    # Step 5: Save and alert (only save profitable deals in production mode)
+    save_comprehensive_data(
+        make=make,
+        model=model,
+        all_listings=all_listings if EXECUTION_MODE == "test" else None,
+        retail_prices=None,  # No retail prices in daily operations
+        profitable_deals=profitable_deals if len(profitable_deals) > 0 else None
+    )
+    
+    # Step 6: Alert for profitable deals
+    if len(profitable_deals) > 0:
+        alert_buyer(profitable_deals, make, model)
+        logger.info(f"✅ Found {len(profitable_deals)} profitable deals using universal model")
+    else:
+        logger.info(f"No profitable deals found for {make} {model or 'all'}")
+
+
+def _process_individual_model(make: str, model: str = None, max_pages: int = None, verify_ssl: bool = False) -> None:
+    """Fallback function using original individual model processing logic"""
+    global EXECUTION_MODE
+    
+    logger.info(f"🔧 Processing {make} {model or 'All Models'} using individual model approach (fallback)")
     
     # Step 1: Scrape all listings (always use cache and proxy)
     all_listings = scrape_listings(make, model, max_pages, use_cache=True, verify_ssl=verify_ssl, use_proxy=True)
@@ -1289,49 +1384,7 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
     # Step 6: Filter for profitable deals
     profitable_deals = filter_profitable_deals(predictions_df)
     
-    # Step 7: Merge enriched data back into all_listings for comprehensive saving
-    if EXECUTION_MODE == "test":
-        # Create a mapping of enriched listings by URL for easy lookup
-        enriched_lookup = {listing.get('url', ''): listing for listing in enriched_dealer_listings}
-        
-        # Create a mapping of ML predictions by URL for private listings
-        predictions_lookup = {}
-        if len(predictions_df) > 0:
-            for _, prediction in predictions_df.iterrows():
-                url = prediction.get('url', '')
-                if url:
-                    # Calculate price_vs_market from ML prediction
-                    asking_price = prediction.get('asking_price', 0)
-                    predicted_market_value = prediction.get('predicted_market_value', 0)
-                    if asking_price > 0:
-                        price_vs_market = predicted_market_value - asking_price
-                        predictions_lookup[url] = price_vs_market
-        
-        # Update all_listings with enriched data
-        for listing in all_listings:
-            listing_url = listing.get('url', '')
-            
-            # For dealer listings: use scraped market value data
-            if listing_url in enriched_lookup:
-                enriched_listing = enriched_lookup[listing_url]
-                if 'price_vs_market' in enriched_listing:
-                    # Calculate market_value from price_vs_market and asking_price
-                    listing['market_value'] = listing['asking_price'] + enriched_listing['price_vs_market']
-            
-            # For private listings: use ML predicted market value
-            elif listing_url in predictions_lookup:
-                # predictions_lookup contains market values for private listings
-                market_value = None
-                for _, pred in predictions_df.iterrows():
-                    if pred.get('url') == listing_url:
-                        listing['market_value'] = pred.get('predicted_market_value', 0)
-                        break
-                
-            # If no market value available, use asking price as fallback
-            if listing.get('market_value') is None:
-                listing['market_value'] = listing['asking_price']
-    
-    # Step 8: Save comprehensive data based on execution mode
+    # Step 7: Save and alert
     save_comprehensive_data(
         make=make,
         model=model,
@@ -1340,7 +1393,7 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
         profitable_deals=profitable_deals if len(profitable_deals) > 0 else None
     )
     
-    # Step 9: Alert for profitable deals
+    # Step 8: Alert for profitable deals
     if len(profitable_deals) > 0:
         alert_buyer(profitable_deals, make, model)
     else:
@@ -1393,113 +1446,164 @@ def test_cache_functionality(make: str, model: str) -> None:
         logger.error(f"Cache files not found for {make} {model}")
 
 
+def get_make_from_model(model_name: str) -> Optional[str]:
+    """
+    Auto-detect make from model name using TARGET_VEHICLES_BY_MAKE configuration.
+    
+    Args:
+        model_name: Vehicle model name (e.g., "3 series", "fiesta", "yaris")
+        
+    Returns:
+        str: Vehicle make in lowercase (e.g., "bmw", "ford", "toyota") or None if not found
+    """
+    from config.config import TARGET_VEHICLES_BY_MAKE
+    
+    if not model_name:
+        return None
+        
+    model_lower = model_name.lower().strip()
+    
+    for make, models in TARGET_VEHICLES_BY_MAKE.items():
+        for model in models:
+            if model.lower() == model_lower:
+                return make.lower()
+    
+    return None
+
+
 def main():
-    """Main entry point for the car deal ML analyzer"""
-    # Define car makes and models to analyze
-    # This can be expanded with more makes/models
+    """Main entry point for the car deal ML analyzer with universal model support"""
+    import argparse
+    from config.config import TARGET_VEHICLES_BY_MAKE, get_weekly_retail_config
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Car Deal ML Analyzer with Universal Model")
+    parser.add_argument("--test", action="store_true", help="Safe test mode: use with --model for individual testing")
+    parser.add_argument("--model", type=str, help="Test specific model (e.g., '3 series', 'fiesta', 'yaris')")
+    parser.add_argument("--weekly-training", action="store_true", help="Force weekly retail scraping and model training")
+    parser.add_argument("--no-proxy", action="store_true", help="Disable proxy rotation")
+    parser.add_argument("--cache-test", action="store_true", help="Test cache functionality only")
+    
+    args = parser.parse_args()
+    
+    # Set execution mode
+    if args.test:
+        set_execution_mode("test")
+        
+    # Get configuration
+    retail_config = get_weekly_retail_config()
+    verify_ssl = retail_config.get('verify_ssl', False)
+    
+    print("\n" + "=" * 60)
+    print("                    🚗 CAR DEALER BOT")
+    print("=" * 60)
+    print()
+    print(f"🔍 Mode: {get_execution_mode()}")
+    
+    # Handle cache testing
+    if args.cache_test:
+        if args.model:
+            make = get_make_from_model(args.model)
+            if make:
+                test_cache_functionality(make, args.model)
+            else:
+                print(f"❌ Unknown model: {args.model}")
+        else:
+            print("❌ Cache test requires --model argument")
+        return
+    
+    # Handle safe individual model testing
+    if args.test and args.model:
+        make = get_make_from_model(args.model)
+        if not make:
+            print(f"❌ Unknown model: {args.model}")
+            print("Available models:")
+            for make_name, models in TARGET_VEHICLES_BY_MAKE.items():
+                print(f"  {make_name}: {', '.join(models)}")
+            return
+        
+        print(f"🧪 SAFE TEST MODE: Processing {make.upper()} {args.model.upper()} individually")
+        print("   - No impact on weekly schedule")
+        print("   - Uses individual ML approach")  
+        print("   - Minimal data usage")
+        print()
+        
+        _process_individual_model(make, args.model, max_pages=None, verify_ssl=verify_ssl)
+        return
+    
+    # Handle weekly training override
+    if args.weekly_training:
+        print("🔄 Forcing weekly retail scraping and model training...")
+        from services.weekly_trainer import run_weekly_training  # Import locally to avoid circular import
+        success = run_weekly_training(
+            max_pages_per_model=None,  # Always use maximum pages
+            verify_ssl=verify_ssl,
+            use_proxy=not args.no_proxy,
+            test_mode=(get_execution_mode() == "test")
+        )
+        
+        if success:
+            print("✅ Weekly training completed successfully")
+        else:
+            print("❌ Weekly training failed")
+        return
+    
+    # Default targets - sample from configuration for production runs
     targets = [
-        {"make": "bmw", "model": "3 series"},  # IMPORTANT: Use "3 series" format (with space), not "3-series"
+        {"make": "bmw", "model": "3 series"},
+        {"make": "audi", "model": "a3"},
         {"make": "ford", "model": "fiesta"},
-        {"make": "toyota", "model": "prius"},
-        # Add more makes/models as needed
-        # AutoTrader formats to use:
-        # BMW: "1 series", "3 series", "5 series"
-        # Mercedes: "a class", "c class", "e class"
-        # Audi: "a1", "a3", "a4", "q3", "q5"
     ]
     
-    # Default settings - disable SSL verification for scraping reliability
-    verify_ssl = False
+    print(f"🎯 Processing {len(targets)} make/model combinations")
+    print()
     
-    # Disable SSL verification globally by default
-    # Use global urllib3 and requests modules
-    global urllib3, requests
+    # Check universal model status
+    if is_universal_model_available():
+        print("✅ Universal model available - ready for efficient daily operations")
+    elif is_retail_scraping_due():
+        print("🔄 Universal model not available and weekly retail scraping is due")
+        print("   This run will include full retail price scraping and model training")
+    else:
+        print("⚠️ Universal model not available but retail scraping not due")
+        print("   Consider running with --weekly-training to create universal model")
+    print()
     
-    # Disable SSL verification warnings
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    # Disable SSL verification for all requests globally
-    try:
-        # For older versions of urllib3
-        if hasattr(urllib3.util.ssl_, 'DEFAULT_CIPHERS'):
-            urllib3.util.ssl_.DEFAULT_CIPHERS += ':HIGH:!DH:!aNULL'
-    except (ImportError, AttributeError):
-        # For newer versions, we can skip this as it's not necessary
-        pass
-        
-    # Disable warnings
-    requests.packages.urllib3.disable_warnings()
-    
-    # Patch the default HTTPS adapter to use unverified context
-    old_merge_environment_settings = requests.Session.merge_environment_settings
-    
-    def merge_environment_settings(self, url, proxies, stream, verify, cert):
-        settings = old_merge_environment_settings(self, url, proxies, stream, verify, cert)
-        settings['verify'] = False
-        return settings
-        
-    requests.Session.merge_environment_settings = merge_environment_settings
-    
-    # Also create a patched Session for all future requests
-    orig_session = requests.Session
-    
-    class PatchedSession(orig_session):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.verify = False
-    
-    requests.Session = PatchedSession
-    
-    # Set the default SSL verification for new requests to False
-    requests.defaults = requests.defaults if hasattr(requests, 'defaults') else {}
-    requests.defaults['verify'] = False
-    
-    # Process command line arguments
-    if len(sys.argv) > 1:
-        if "--test" in sys.argv:
-            # Enable test mode for comprehensive data saving
-            set_execution_mode("test")
-            sys.argv.remove("--test")
-        
-        # Check for --model flag
-        if "--model" in sys.argv:
-            model_index = sys.argv.index("--model")
-            if model_index + 1 < len(sys.argv):
-                model = sys.argv[model_index + 1]
-                make = "BMW"  # Default make when using --model
-                
-                print("\n" + "=" * 60)
-                print("                    🚗 CAR DEALER BOT")
-                print("=" * 60)
-                print()
-                print(f"🔍 Processing: {make} {model} ({get_execution_mode()} mode)")
-                print()
-                
-                process_car_model(make, model, verify_ssl=verify_ssl)
-                sys.exit(0)
-        
-        # Check remaining args after flag processing
-        if len(sys.argv) >= 2:
-            # Process specific make/model from command line
-            make = sys.argv[1]
-            model = sys.argv[2] if len(sys.argv) > 2 else None
-            
-            print("\n" + "=" * 60)
-            print("                    🚗 CAR DEALER BOT")
-            print("=" * 60)
-            print()
-            print(f"🔍 Processing: {make} {model or 'All Models'} ({get_execution_mode()} mode)")
-            print()
-            
-            process_car_model(make, model, verify_ssl=verify_ssl)
-            sys.exit(0)
-    
-    # Process all defined targets
-    for target in targets:
+    # Process all targets
+    for i, target in enumerate(targets):
         try:
-            process_car_model(target["make"], target.get("model"), verify_ssl=verify_ssl)
+            print(f"\n{'='*60}")
+            print(f"PROCESSING {i+1}/{len(targets)}: {target['make'].upper()} {target['model'].upper()}")
+            print(f"{'='*60}")
+            
+            process_car_model(
+                make=target["make"], 
+                model=target["model"], 
+                max_pages=None,  # Always use maximum pages
+                verify_ssl=verify_ssl
+            )
+            
         except Exception as e:
-            logger.error(f"Error processing {target['make']} {target.get('model', 'all')}: {e}")
+            print(f"❌ Error processing {target['make']} {target['model']}: {e}")
+            logger.error(f"Error processing {target['make']} {target['model']}: {e}")
+            continue
+    
+    print(f"\n{'='*60}")
+    print(f"PROCESSING COMPLETE")
+    print(f"{'='*60}")
+    print(f"✅ Successfully processed {len(targets)} make/model combinations")
+    
+    # Show schedule status
+    from services.schedule_manager import get_schedule_status
+    schedule_status = get_schedule_status()
+    print(f"\n📅 Schedule Status:")
+    print(f"   Weekly retail scraping due: {'Yes' if schedule_status['is_due'] else 'No'}")
+    if schedule_status['days_since_last']:
+        print(f"   Days since last scraping: {schedule_status['days_since_last']}")
+    if schedule_status['next_scheduled']:
+        print(f"   Next scheduled: {schedule_status['next_scheduled']}")
+    
+    print()
 
 
 # ────────────────────────────────────────────────────────────
@@ -1508,7 +1612,7 @@ def main():
 
 def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, verbose: bool = False) -> None:
     """
-    Enhanced analysis using ML models for vehicle profit prediction.
+    Enhanced analysis using universal ML model for vehicle profit prediction.
     Compatible with the existing scraper.py interface.
     
     Args:
@@ -1529,7 +1633,113 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
         return
     
     if verbose:
-        logger.info(f"🔧 Starting enhanced analysis of {len(listings)} listings...")
+        logger.info(f"🔧 Starting enhanced analysis of {len(listings)} listings using universal model...")
+    
+    # Check if weekly training is due (unlikely during scraper runs, but check anyway)
+    if is_retail_scraping_due():
+        if verbose:
+            logger.info("⚠️ Weekly retail scraping is due - consider running weekly training")
+    
+    # Step 1: Load universal model
+    if not is_universal_model_available():
+        if verbose:
+            logger.warning("⚠️ No universal model available - falling back to individual processing")
+        _enhanced_analyse_listings_individual(listings, cfg, verbose)
+        return
+    
+    if not load_universal_model():
+        if verbose:
+            logger.error("❌ Failed to load universal model - falling back to individual processing")
+        _enhanced_analyse_listings_individual(listings, cfg, verbose)
+        return
+    
+    # Step 2: Filter for private listings (universal model works on private listings)
+    private_listings = [listing for listing in listings if listing.get('seller_type', '').upper() == 'PRIVATE']
+    
+    if not private_listings:
+        if verbose:
+            logger.info("No private listings found for universal model analysis")
+        return
+    
+    if verbose:
+        logger.info(f"📋 Analyzing {len(private_listings)} private listings with universal model")
+    
+    # Step 3: Use universal model to predict market values
+    try:
+        predictions_df = predict_with_universal_model(private_listings)
+        
+        if predictions_df.empty:
+            if verbose:
+                logger.error("❌ Universal model prediction failed")
+            return
+        
+        # Step 4: Convert predictions back to listings format and add analysis results
+        analyzed_listings = []
+        
+        for i, (_, prediction) in enumerate(predictions_df.iterrows()):
+            if i < len(private_listings):
+                original_listing = private_listings[i].copy()
+                
+                # Add universal ML prediction results
+                predicted_margin = prediction.get('predicted_profit_margin', 0)
+                predicted_market_value = prediction.get('predicted_market_value', 0)
+                potential_profit = prediction.get('potential_profit', 0)
+                
+                original_listing['enhanced_retail_estimate'] = predicted_market_value
+                original_listing['enhanced_gross_margin_pct'] = predicted_margin
+                original_listing['enhanced_gross_cash_profit'] = potential_profit
+                
+                # Determine rating based on universal ML prediction
+                if predicted_margin >= cfg['excellent_margin_pct']:
+                    rating = "Excellent Deal"
+                elif predicted_margin >= cfg['good_margin_pct']:
+                    rating = "Good Deal"
+                elif predicted_margin >= cfg['negotiation_margin_pct'] and potential_profit >= cfg['min_cash_margin']:
+                    rating = "Negotiation Target"
+                else:
+                    rating = "Reject"
+                
+                original_listing['enhanced_rating'] = rating
+                original_listing['analysis_method'] = 'universal_ml_model'
+                
+                # Only keep profitable deals
+                if rating != "Reject":
+                    analyzed_listings.append(original_listing)
+        
+        # Replace original listings with analyzed results
+        listings.clear()
+        listings.extend(analyzed_listings)
+        
+        if verbose:
+            logger.info(f"✅ Universal ML analysis complete: {len(analyzed_listings)} profitable deals found")
+        
+        # Save data in test mode when called from scraper
+        global EXECUTION_MODE
+        if EXECUTION_MODE == "test" and analyzed_listings:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            deals_file = os.path.join(DATA_OUTPUTS_PATH, f"{timestamp}_scraper_universal_analyzed_deals.json")
+            try:
+                import json
+                with open(deals_file, 'w') as f:
+                    json.dump(analyzed_listings, f, indent=2, default=str)
+                logger.info(f"💾 Saved {len(analyzed_listings)} universal analyzed deals to {deals_file}")
+            except Exception as e:
+                logger.error(f"❌ Error saving universal analyzed deals: {e}")
+    
+    except Exception as e:
+        if verbose:
+            logger.error(f"Error in universal model analysis: {e}")
+        # Fall back to individual processing
+        _enhanced_analyse_listings_individual(listings, cfg, verbose)
+
+
+def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: Dict, verbose: bool = False) -> None:
+    """
+    Fallback enhanced analysis using individual make/model processing.
+    This is the original enhanced_analyse_listings logic.
+    """
+    if verbose:
+        logger.info(f"🔧 Using individual model analysis for {len(listings)} listings...")
     
     # Step 1: Enrich with retail price markers first
     if verbose:
@@ -1551,7 +1761,7 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
     
     # Step 2: Continue with ML analysis
     if verbose:
-        logger.info(f"🤖 Starting ML analysis...")
+        logger.info(f"🤖 Starting individual ML analysis...")
     
     # Group listings by make/model for efficient processing
     grouped_listings = {}
@@ -1592,7 +1802,6 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
                     'mileage': listing.get('mileage', 50000),
                     'seller_type': 'Dealer',
                     'url': listing.get('url', ''),
-                    # Preserve original spec unchanged from API (trim/variant info)
                     'spec': listing.get('spec', '')
                 })
             
@@ -1613,7 +1822,6 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
                     'mileage': listing.get('mileage', 50000),
                     'seller_type': 'Private',
                     'url': listing.get('url', ''),
-                    # Preserve original spec unchanged from API (trim/variant info)
                     'spec': listing.get('spec', '')
                 })
             
@@ -1644,7 +1852,7 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
                         rating = "Reject"
                     
                     original_listing['enhanced_rating'] = rating
-                    original_listing['analysis_method'] = 'ml_xgboost'
+                    original_listing['analysis_method'] = 'individual_ml_xgboost'
                     
                     # Only keep profitable deals
                     if rating != "Reject":
@@ -1659,19 +1867,20 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
     listings.extend(analyzed_listings)
     
     if verbose:
-        logger.info(f"✅ ML analysis complete: {len(analyzed_listings)} profitable deals found")
+        logger.info(f"✅ Individual ML analysis complete: {len(analyzed_listings)} profitable deals found")
     
     # Save data in test mode when called from scraper
     global EXECUTION_MODE
     if EXECUTION_MODE == "test" and analyzed_listings:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        deals_file = os.path.join(DATA_OUTPUTS_PATH, f"{timestamp}_scraper_analyzed_deals.json")
+        deals_file = os.path.join(DATA_OUTPUTS_PATH, f"{timestamp}_scraper_individual_analyzed_deals.json")
         try:
+            import json
             with open(deals_file, 'w') as f:
                 json.dump(analyzed_listings, f, indent=2, default=str)
-            logger.info(f"💾 Saved {len(analyzed_listings)} analyzed deals from scraper to {deals_file}")
+            logger.info(f"💾 Saved {len(analyzed_listings)} individual analyzed deals to {deals_file}")
         except Exception as e:
-            logger.error(f"❌ Error saving scraper deals: {e}")
+            logger.error(f"❌ Error saving individual analyzed deals: {e}")
 
 
 def enhanced_keep_listing(listing: Dict[str, Any], cfg: Dict = None) -> bool:

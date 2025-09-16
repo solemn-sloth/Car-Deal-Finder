@@ -18,6 +18,40 @@ CAR_DEALS_TABLE = os.getenv('CAR_DEALS_TABLE', 'car_deals')
 # Application Configuration
 DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
 
+# Weekly Retail Scraping Configuration
+WEEKLY_RETAIL_SCRAPING = {
+    'interval_days': int(os.getenv('RETAIL_SCRAPING_INTERVAL_DAYS', '7')),  # Days between retail scraping runs
+    'schedule_file': os.getenv('RETAIL_SCHEDULE_FILE', 'config/scraping_scheduler.json'),  # Custom schedule file path
+    'max_pages_per_model': int(os.getenv('MAX_PAGES_PER_MODEL', '0')) or None,  # 0 = unlimited
+    'use_proxy': os.getenv('USE_PROXY_FOR_RETAIL', 'true').lower() == 'true',
+    'verify_ssl': os.getenv('VERIFY_SSL', 'false').lower() == 'true'
+}
+
+# Universal ML Model Configuration  
+UNIVERSAL_ML_CONFIG = {
+    'model_path': os.getenv('UNIVERSAL_MODEL_PATH', None),  # Custom model path (None = auto)
+    'min_training_samples': int(os.getenv('MIN_TRAINING_SAMPLES', '50')),  # Minimum samples to train universal model
+    'feature_columns': [  # Fixed feature set for universal model
+        'asking_price', 'mileage', 'age', 'make_encoded', 'model_encoded',
+        'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric'
+    ],
+    'xgboost_params': {  # XGBoost parameters for universal model
+        'objective': 'reg:squarederror',
+        'eval_metric': 'rmse',
+        'max_depth': int(os.getenv('XGBOOST_MAX_DEPTH', '6')),
+        'eta': float(os.getenv('XGBOOST_ETA', '0.1')),
+        'subsample': float(os.getenv('XGBOOST_SUBSAMPLE', '0.8')),
+        'colsample_bytree': float(os.getenv('XGBOOST_COLSAMPLE_BYTREE', '0.8')),
+        'min_child_weight': int(os.getenv('XGBOOST_MIN_CHILD_WEIGHT', '3')),
+        'seed': 42
+    },
+    'training_params': {
+        'num_boost_round': int(os.getenv('XGBOOST_ROUNDS', '150')),
+        'early_stopping_rounds': int(os.getenv('XGBOOST_EARLY_STOPPING', '15')),
+        'test_size': float(os.getenv('ML_TEST_SIZE', '0.2'))
+    }
+}
+
 # AutoTrader URL Generation Configuration
 AUTOTRADER_BASE_URL = "https://www.autotrader.co.uk/car-search"
 DEFAULT_SEARCH_PARAMS = {
@@ -124,3 +158,66 @@ def get_vehicle_configs():
         configs.append(config)
     
     return configs
+
+def get_weekly_retail_config():
+    """
+    Get weekly retail scraping configuration.
+    
+    Returns:
+        dict: Weekly retail scraping configuration
+    """
+    return WEEKLY_RETAIL_SCRAPING.copy()
+
+def get_universal_ml_config():
+    """
+    Get universal ML model configuration.
+    
+    Returns:
+        dict: Universal ML model configuration
+    """
+    return UNIVERSAL_ML_CONFIG.copy()
+
+def get_schedule_interval_days():
+    """
+    Get the retail scraping schedule interval in days.
+    
+    Returns:
+        int: Days between retail scraping runs
+    """
+    return WEEKLY_RETAIL_SCRAPING['interval_days']
+
+def should_use_proxy_for_retail():
+    """
+    Check if proxy should be used for retail price scraping.
+    
+    Returns:
+        bool: True if proxy should be used
+    """
+    return WEEKLY_RETAIL_SCRAPING['use_proxy']
+
+def get_xgboost_params():
+    """
+    Get XGBoost parameters for universal model training.
+    
+    Returns:
+        dict: XGBoost parameters
+    """
+    return UNIVERSAL_ML_CONFIG['xgboost_params'].copy()
+
+def get_training_params():
+    """
+    Get training parameters for universal model.
+    
+    Returns:
+        dict: Training parameters
+    """
+    return UNIVERSAL_ML_CONFIG['training_params'].copy()
+
+def get_min_training_samples():
+    """
+    Get minimum number of samples required to train universal model.
+    
+    Returns:
+        int: Minimum training samples
+    """
+    return UNIVERSAL_ML_CONFIG['min_training_samples']
