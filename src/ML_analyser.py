@@ -45,7 +45,7 @@ from services.universal_ml_model import (
     load_universal_model, predict_with_universal_model, 
     is_universal_model_available, get_universal_model_info
 )
-from services.schedule_manager import is_retail_scraping_due
+from config.config import is_retail_scraping_due
 
 # Project paths - everything goes to archive folder
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -225,8 +225,8 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
     api_client = AutoTraderAPIClient(verify_ssl=verify_ssl, proxy=proxy, proxy_manager=proxy_manager)
     
     try:
-        # Use the existing get_all_cars method to scrape listings with no page limit
-        cars = api_client.get_all_cars(
+        # Use mileage splitting to bypass AutoTrader's 2000 listing limit
+        cars = api_client.get_all_cars_with_mileage_splitting(
             make=make,
             model=model,
             max_pages=max_pages  # Passing None to get all pages
@@ -1594,7 +1594,7 @@ def main():
     print(f"✅ Successfully processed {len(targets)} make/model combinations")
     
     # Show schedule status
-    from services.schedule_manager import get_schedule_status
+    from config.config import get_schedule_status
     schedule_status = get_schedule_status()
     print(f"\n📅 Schedule Status:")
     print(f"   Weekly retail scraping due: {'Yes' if schedule_status['is_due'] else 'No'}")

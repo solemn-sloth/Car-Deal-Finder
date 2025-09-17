@@ -169,7 +169,7 @@ class SmartGroupingOrchestrator:
             # Make ONE API call for this make/model
             print(f"🔍 Scraping {group.make} {group.model} from {group.search_criteria['year_from']}-{group.search_criteria['year_to']}, max_mileage: {group.search_criteria['maximum_mileage']}")
             
-            raw_vehicles = self.api_client.get_all_cars(
+            raw_vehicles = self.api_client.get_all_cars_with_mileage_splitting(
                 make=group.make,
                 model=group.model,
                 postcode="HP13 7LW",  # From original config

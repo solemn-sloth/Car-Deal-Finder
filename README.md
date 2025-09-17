@@ -79,7 +79,8 @@ FEATURE_COLUMNS = [
 ### AutoTrader GraphQL API
 - **Direct API Access**: Bypasses HTML parsing with GraphQL queries to `/at-gateway`
 - **Complete Data**: Returns JSON with all listing details, images, seller info, specifications
-- **Pagination**: Handles up to ~2,000 cars per search (AutoTrader's pagination limit)
+- **Automatic Limit Bypass**: Intelligently splits searches into 5 mileage ranges (0-20k, 20-40k, 40-60k, 60-80k, 80-100k miles) to completely bypass AutoTrader's ~2,000 listing pagination limit
+- **Smart Deduplication**: Removes duplicate listings across mileage ranges to ensure clean results
 - **Rate Limiting**: Intelligent delays and retry mechanisms to avoid detection
 
 ### Multi-Worker Parallel Processing  
@@ -89,28 +90,35 @@ FEATURE_COLUMNS = [
 - **Fault Tolerance**: Workers continue if others fail, graceful degradation
 
 ### Performance Optimizations
-- **Connection Pooling**: Reuses HTTP connections with configurable pool sizes  
+- **Connection Pooling**: Reuses HTTP connections with configurable pool sizes
 - **Intelligent Caching**: API responses cached to avoid duplicate requests
 - **Batch Processing**: Groups similar requests to maximize throughput
 - **Memory Management**: Efficient data structures and garbage collection
 
+### Complete Listing Coverage System
+- **Automatic Range Division**: Every search is transparently split into 5 mileage ranges to completely bypass AutoTrader's pagination limits
+- **Configurable Ranges**: Default ranges (0-20k, 20-40k, 40-60k, 60-80k, 80-100k miles) ensure comprehensive coverage and can be customized
+- **Silent Operation**: Fully transparent to users - existing code continues to work without any changes
+- **Smart Deduplication**: Advanced duplicate detection removes overlapping listings using unique advertiser IDs
+- **Fault Tolerance**: If one mileage range fails, others continue processing to maximize data capture
+- **Performance Optimized**: Sequential processing prevents rate limiting while maintaining high throughput
+
 ## 📁 Core System Components
 
 ### Primary Scraping & Analysis
-- **`network_requests.py`** - AutoTrader GraphQL API client with anti-detection
+- **`network_requests.py`** - AutoTrader GraphQL API client with mileage splitting and anti-detection
 - **`proxy_rotation.py`** - Webshare API integration with automatic refresh and blacklisting
 - **`retail_price_scraper.py`** - 6-worker Playwright system for parallel price marker extraction
 - **`universal_ml_model.py`** - XGBoost training and prediction system for all vehicle types
 
-### ML & Data Processing  
-- **`universal_encodings.py`** - Standardized encoding system for makes, models, specs
+### ML & Data Processing
 - **`ML_analyser.py`** - Main analysis pipeline coordinating scraping and ML prediction
+- **`ML_trainer.py`** - Automated weekly model training and performance monitoring
 - **`data_adapter.py`** - Data format standardization and validation
-- **`weekly_trainer.py`** - Automated model training and performance monitoring
 
-### Infrastructure & Configuration
-- **`config/config.py`** - Centralized configuration with environment variables
-- **`services/schedule_manager.py`** - Task scheduling and automation
+### Configuration & Infrastructure
+- **`config/config.py`** - Centralized configuration with environment variables and scheduling functions
+- **`config/encodings.py`** - Standardized encoding mappings for makes, models, and specifications
 - **`services/notifications.py`** - Email alerts and result reporting
 - **`src/storage.py`** - Supabase database operations and caching
 
@@ -225,8 +233,9 @@ UNIVERSAL_ML_CONFIG = {
 ## 📊 Performance Characteristics
 
 ### Throughput Metrics
-- **API Scraping**: ~2,000 listings per model in 2-3 minutes
-- **Retail Processing**: 6 parallel workers handle 100+ dealer listings per minute  
+- **API Scraping**: Complete vehicle coverage with mileage splitting - bypasses 2,000 listing limits
+- **Comprehensive Coverage**: 5x more listings captured through automatic mileage range splitting
+- **Retail Processing**: 6 parallel workers handle 100+ dealer listings per minute
 - **ML Predictions**: Universal model processes 1,000+ listings in seconds
 - **Daily Capacity**: Can analyze 50+ vehicle models in automated daily runs
 

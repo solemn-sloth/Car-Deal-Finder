@@ -4,6 +4,8 @@ Contains vehicle search configurations and database settings.
 """
 from dotenv import load_dotenv
 import os
+import json
+from datetime import datetime
 from pathlib import Path
 
 # Load environment variables from config folder
@@ -33,7 +35,7 @@ WEEKLY_RETAIL_SCRAPING = {
     'schedule_file': os.getenv('RETAIL_SCHEDULE_FILE', 'config/scraping_scheduler.json'),  # Custom schedule file path
     'max_pages_per_model': int(os.getenv('MAX_PAGES_PER_MODEL', '0')) or None,  # 0 = unlimited
     'use_proxy': os.getenv('USE_PROXY_FOR_RETAIL', 'true').lower() == 'true',
-    'verify_ssl': os.getenv('VERIFY_SSL', 'false').lower() == 'true'
+    'verify_ssl': os.getenv('VERIFY_SSL', 'false').lower() == 'true'  # Disabled by default to avoid CloudFlare issues
 }
 
 # Universal ML Model Configuration  
@@ -77,6 +79,19 @@ VEHICLE_SEARCH_CRITERIA = {
     "year_from": 2010,
     "year_to": 2020
 }
+
+# Mileage range splitting configuration to bypass AutoTrader's 2000 listing limit
+# Each search will be split into these ranges to ensure complete coverage
+MILEAGE_RANGES_FOR_SPLITTING = [
+    (0, 20000),
+    (20001, 40000),
+    (40001, 60000),
+    (60001, 80000),
+    (80001, 100000)
+]
+
+# Enable mileage splitting by default to bypass listing limits
+ENABLE_MILEAGE_SPLITTING = True
 
 # Target vehicle makes/models - Organized by make for better maintainability
 TARGET_VEHICLES_BY_MAKE = {
@@ -225,8 +240,119 @@ def get_training_params():
 def get_min_training_samples():
     """
     Get minimum number of samples required to train universal model.
-    
+
     Returns:
         int: Minimum training samples
     """
     return UNIVERSAL_ML_CONFIG['min_training_samples']
+
+
+# ──────────────────────────────────────────────────────────────────
+# Schedule Management Functions (simplified from schedule_manager.py)
+# ──────────────────────────────────────────────────────────────────
+
+def _get_schedule_file_path():
+    """Get the path to the schedule file."""
+    return Path(__file__).parent / "scraping_scheduler.json"
+
+def _load_schedule_data():
+    """Load schedule data from file."""
+    schedule_file = _get_schedule_file_path()
+
+    default_data = {
+        "last_retail_scraping": None,
+        "last_scraping_success": True,
+        "scraping_history": []
+    }
+
+    if not schedule_file.exists():
+        return default_data
+
+    try:
+        with open(schedule_file, 'r') as f:
+            data = json.load(f)
+        return data
+    except (json.JSONDecodeError, IOError):
+        return default_data
+
+def _save_schedule_data(data):
+    """Save schedule data to file."""
+    schedule_file = _get_schedule_file_path()
+    try:
+        with open(schedule_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except IOError:
+        return False
+
+def is_retail_scraping_due():
+    """Check if weekly retail scraping is due (7+ days since last run)."""
+    data = _load_schedule_data()
+
+    if not data.get("last_retail_scraping"):
+        return True  # No previous scraping found
+
+    try:
+        from datetime import datetime, timedelta
+        last_scraping = datetime.fromisoformat(data["last_retail_scraping"])
+        days_since = (datetime.now() - last_scraping).days
+        return days_since >= WEEKLY_RETAIL_SCRAPING['interval_days']
+    except (ValueError, KeyError):
+        return True  # Invalid data, assume due
+
+def mark_retail_scraping_started():
+    """Mark that retail scraping has started."""
+    data = _load_schedule_data()
+    data["scraping_started"] = datetime.now().isoformat()
+    return _save_schedule_data(data)
+
+def mark_retail_scraping_complete(success=True, total_vehicles=0, notes=None):
+    """Mark retail scraping as complete."""
+    data = _load_schedule_data()
+
+    # Update main fields
+    data["last_retail_scraping"] = datetime.now().isoformat()
+    data["last_scraping_success"] = success
+
+    # Add to history
+    if "scraping_history" not in data:
+        data["scraping_history"] = []
+
+    history_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "success": success,
+        "total_vehicles": total_vehicles,
+        "notes": notes
+    }
+    data["scraping_history"].append(history_entry)
+
+    # Keep only last 10 entries
+    data["scraping_history"] = data["scraping_history"][-10:]
+
+    return _save_schedule_data(data)
+
+def get_schedule_status():
+    """Get comprehensive schedule status information."""
+    data = _load_schedule_data()
+
+    status = {
+        "is_due": is_retail_scraping_due(),
+        "last_scraping": data.get("last_retail_scraping"),
+        "last_success": data.get("last_scraping_success", True),
+        "days_since_last": None,
+        "next_scheduled": None
+    }
+
+    if data.get("last_retail_scraping"):
+        try:
+            from datetime import datetime, timedelta
+            last_scraping = datetime.fromisoformat(data["last_retail_scraping"])
+            days_since = (datetime.now() - last_scraping).days
+            status["days_since_last"] = days_since
+
+            next_scheduled = last_scraping + timedelta(days=WEEKLY_RETAIL_SCRAPING['interval_days'])
+            status["next_scheduled"] = next_scheduled.strftime("%Y-%m-%d")
+        except (ValueError, KeyError):
+            pass
+
+    return status

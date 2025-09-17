@@ -16,7 +16,7 @@ from dataclasses import dataclass
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.config import TARGET_VEHICLES_BY_MAKE
-from services.schedule_manager import mark_retail_scraping_started, mark_retail_scraping_complete
+from config.config import mark_retail_scraping_started, mark_retail_scraping_complete
 from services.universal_ml_model import train_universal_model
 from src.ML_analyser import scrape_listings, enrich_with_price_markers, filter_listings_by_seller_type
 

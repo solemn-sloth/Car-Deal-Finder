@@ -8,9 +8,13 @@ import secrets
 from typing import List, Dict, Optional
 from requests.packages.urllib3.util.retry import Retry
 
+# Disable SSL warnings globally to avoid CloudFlare issues
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 class CustomHTTPAdapter(requests.adapters.HTTPAdapter):
     """Custom adapter with specific cipher suites and TLS versions to mimic browser TLS fingerprints"""
-    def __init__(self, *args, verify_ssl=True, **kwargs):
+    def __init__(self, *args, verify_ssl=False, **kwargs):
         self.verify_ssl = verify_ssl
         super().__init__(*args, **kwargs)
         
@@ -98,7 +102,7 @@ def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
     return raw_url
 
 class AutoTraderAPIClient:
-    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None, verify_ssl=True):
+    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None, verify_ssl=False):
         """Initialize the AutoTrader API client with configurable connection pooling.
         
         Args:
@@ -385,24 +389,25 @@ class AutoTraderAPIClient:
             viewport_width = random.choice(["1280", "1366", "1440", "1536", "1920"])
             self.session.headers['viewport-width'] = viewport_width
     
-    def search_cars(self, make: str, model: str, postcode: str = "M15 4FN", 
-                   min_year: int = 2010, max_year: int = 2023, 
-                   max_mileage: int = 100000, page: int = 1, private_only: bool = True,
+    def search_cars(self, make: str, model: str, postcode: str = "M15 4FN",
+                   min_year: int = 2010, max_year: int = 2023,
+                   min_mileage: int = 0, max_mileage: int = 100000, page: int = 1, private_only: bool = True,
                    max_retries: int = 2) -> Dict:
         """
         Search for cars using AutoTrader's GraphQL API
-        
+
         Args:
             make: Car manufacturer
             model: Car model
             postcode: UK postcode for search location
             min_year: Minimum manufacturing year
             max_year: Maximum manufacturing year
+            min_mileage: Minimum mileage
             max_mileage: Maximum mileage
             page: Results page number
             private_only: Whether to include only private seller listings
             max_retries: Maximum number of retries for CloudFlare errors
-        
+
         Returns:
             Dict containing search results data
         """
@@ -424,6 +429,7 @@ class AutoTraderAPIClient:
                         {"filter": "is_writeoff", "selected": ["exclude"]},
                         {"filter": "make", "selected": [make.upper()]},
                         {"filter": "max_mileage", "selected": [str(max_mileage)]},
+                        {"filter": "min_mileage", "selected": [str(min_mileage)]},
                         {"filter": "max_year_manufactured", "selected": [str(max_year)]},
                         {"filter": "min_year_manufactured", "selected": [str(min_year)]},
                         {"filter": "model", "selected": [model]},
@@ -743,20 +749,21 @@ class AutoTraderAPIClient:
         return None
     
     def get_all_cars(self, make: str, model: str, postcode: str = "M15 4FN",
-                     min_year: int = 2010, max_year: int = 2023, 
-                     max_mileage: int = 100000, max_pages: int = None) -> List[Dict]:
+                     min_year: int = 2010, max_year: int = 2023,
+                     min_mileage: int = 0, max_mileage: int = 100000, max_pages: int = None) -> List[Dict]:
         """
         Get all cars from multiple pages
-        
+
         Args:
             make: Car manufacturer
             model: Car model (use format like "3 series" not "3-series")
             postcode: UK postcode for search location
             min_year: Minimum manufacturing year
             max_year: Maximum manufacturing year
+            min_mileage: Minimum mileage
             max_mileage: Maximum mileage
             max_pages: Maximum number of pages to fetch (None for all)
-            
+
         Returns:
             List of car listings data
         """
@@ -774,12 +781,13 @@ class AutoTraderAPIClient:
             # Use the search_cars method with retry mechanism
             try:
                 data = self.search_cars(
-                    make=make, 
-                    model=model, 
-                    postcode=postcode, 
-                    min_year=min_year, 
-                    max_year=max_year, 
-                    max_mileage=max_mileage, 
+                    make=make,
+                    model=model,
+                    postcode=postcode,
+                    min_year=min_year,
+                    max_year=max_year,
+                    min_mileage=min_mileage,
+                    max_mileage=max_mileage,
                     page=page,
                     max_retries=2  # Allow up to 2 retries for CloudFlare issues
                 )
@@ -826,6 +834,89 @@ class AutoTraderAPIClient:
         
         print()  # Print a newline after the dots
         
+        return all_cars
+
+    def get_all_cars_with_mileage_splitting(self, make: str, model: str, postcode: str = "M15 4FN",
+                                          min_year: int = 2010, max_year: int = 2023,
+                                          max_mileage: int = 100000, max_pages: int = None) -> List[Dict]:
+        """
+        Get all cars using mileage range splitting to bypass AutoTrader's 2000 listing limit.
+
+        This method splits the search into multiple mileage ranges and combines the results
+        to ensure complete coverage of all available vehicles.
+
+        Args:
+            make: Car manufacturer
+            model: Car model (use format like "3 series" not "3-series")
+            postcode: UK postcode for search location
+            min_year: Minimum manufacturing year
+            max_year: Maximum manufacturing year
+            max_mileage: Maximum mileage (used to determine range upper bound)
+            max_pages: Maximum number of pages to fetch per range (None for all)
+
+        Returns:
+            List of car listings data (deduplicated)
+        """
+        # Import the mileage ranges from config
+        try:
+            from config.config import MILEAGE_RANGES_FOR_SPLITTING, ENABLE_MILEAGE_SPLITTING
+        except ImportError:
+            # Fallback to default ranges if config import fails
+            MILEAGE_RANGES_FOR_SPLITTING = [
+                (0, 20000),
+                (20001, 40000),
+                (40001, 60000),
+                (60001, 80000),
+                (80001, 100000)
+            ]
+            ENABLE_MILEAGE_SPLITTING = True
+
+        # If mileage splitting is disabled, use the original method
+        if not ENABLE_MILEAGE_SPLITTING:
+            return self.get_all_cars(make, model, postcode, min_year, max_year, 0, max_mileage, max_pages)
+
+        print(f"🔄 Scraping {make} {model} with mileage splitting...", end="", flush=True)
+
+        all_cars = []
+        seen_ids = set()  # Track unique car IDs to avoid duplicates
+
+        # Filter ranges to only include those within our max_mileage limit
+        applicable_ranges = [
+            (min_mile, min(max_mile, max_mileage))
+            for min_mile, max_mile in MILEAGE_RANGES_FOR_SPLITTING
+            if min_mile <= max_mileage
+        ]
+
+        for range_idx, (min_mile, max_mile) in enumerate(applicable_ranges):
+            try:
+                print(".", end="", flush=True)  # Progress indicator
+
+                # Get cars for this mileage range
+                range_cars = self.get_all_cars(
+                    make=make,
+                    model=model,
+                    postcode=postcode,
+                    min_year=min_year,
+                    max_year=max_year,
+                    min_mileage=min_mile,
+                    max_mileage=max_mile,
+                    max_pages=max_pages
+                )
+
+                # Deduplicate based on deal_id or url
+                for car in range_cars:
+                    car_id = car.get('deal_id') or car.get('url', '')
+                    if car_id and car_id not in seen_ids:
+                        seen_ids.add(car_id)
+                        all_cars.append(car)
+
+            except Exception as e:
+                print(f"\n⚠️ Error in mileage range {min_mile}-{max_mile}: {e}")
+                continue  # Continue with other ranges
+
+        print()  # Print a newline after the dots
+
+        print(f"📊 Results: {len(all_cars)} unique listings found across {len(applicable_ranges)} mileage ranges")
         return all_cars
 
 def convert_api_car_to_deal(car_data: Dict) -> Dict:

@@ -22,7 +22,7 @@ from pathlib import Path
 # Add project root to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.universal_encodings import encode_listings, get_encoding_stats
+from config.encodings import encode_listings, get_encoding_stats
 
 logger = logging.getLogger(__name__)
 
