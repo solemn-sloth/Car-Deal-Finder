@@ -27,6 +27,10 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from playwright.sync_api import sync_playwright
 
+# Import encodings for make/model one-hot encoding
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from config.encodings import MAKE_ENCODING, MODEL_ENCODING
+
 # Set up proper import paths (only need to do this once)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -324,9 +328,10 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
                     enriched_listings.append(enriched_listing)
                     cache_hit_count += 1
                 else:
-                    # No cached data for this URL
-                    listing['price_vs_market'] = 0.0  # Default to market value
-                    enriched_listings.append(listing)
+                    # No cached data for this URL - skip this listing for training
+                    # We should not default to 0.0 as this creates noise in training data
+                    logger.debug(f"Skipping listing without cached price marker: {listing.get('make', '')} {listing.get('model', '')}")
+                    continue
             
             logger.info(f"Applied {cache_hit_count}/{len(listings)} cached retail prices")
             
@@ -426,8 +431,9 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
                     # Only log errors in test mode to avoid spam
                     if EXECUTION_MODE == "test":
                         logger.warning(f"Error for {listing.get('make', '')} {listing.get('model', '')}: {price_marker.get('marker_text', 'Unknown error')}")
-                    listing['price_vs_market'] = 0.0  # Default to market value
-                    enriched_listings.append(listing)
+                    # Skip this listing instead of defaulting to 0.0 - prevents bad training data
+                    logger.debug(f"Skipping listing with scraping error: {listing.get('make', '')} {listing.get('model', '')}")
+                    continue
                 else:
                     # Successful result
                     success_count += 1
@@ -449,13 +455,14 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
                     if success_count % 10 == 0:  # Log every 10th success
                         logger.info(f"Enriched {success_count} listings with price markers")
             else:
-                # URL was processed but no result
+                # URL was processed but no result - skip this listing
                 error_count += 1
                 # Only log errors in test mode to avoid spam
                 if EXECUTION_MODE == "test":
                     logger.error(f"No price marker result for URL: {url}")
-                listing['price_vs_market'] = 0.0  # Default to market value
-                enriched_listings.append(listing)
+                # Skip this listing instead of defaulting to 0.0 - prevents bad training data
+                logger.debug(f"Skipping listing without price marker result: {listing.get('make', '')} {listing.get('model', '')}")
+                continue
         
         # Save retail prices to cache if we have data and make/model are provided
         if retail_prices_cache and make is not None:
@@ -507,9 +514,9 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
                 
             except Exception as e:
                 logger.error(f"Error enriching listing with price marker: {e}")
-                # Add without price marker
-                listing['price_vs_market'] = 0.0  # Default to market value
-                enriched_listings.append(listing)
+                # Skip listing with exception instead of defaulting to 0.0
+                logger.debug(f"Skipping listing due to processing error: {listing.get('make', '')} {listing.get('model', '')}")
+                continue
         
         print("\nSequential processing complete")
         
@@ -558,11 +565,11 @@ def prepare_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
         if col not in df.columns:
             logger.error(f"Required column '{col}' missing from listings data")
             df[col] = np.nan
-    
+
     # Handle legacy price_numeric column if it exists
     if 'price_numeric' in df.columns and 'asking_price' not in df.columns:
         df['asking_price'] = df['price_numeric']
-    
+
     # Compute car age from year
     current_year = datetime.now().year
     df['age'] = current_year - df['year']
@@ -623,68 +630,48 @@ def prepare_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
         # Clean up spec text a bit
         df['spec_text'] = df['spec_text'].str.lower()
         
-        # Define trim levels and their numeric values (higher = more premium/expensive)
-        # The base value is 1.0, with premium trims getting higher values
-        trim_levels = {
-            # VW Golf variants
-            'r-line': 2.5,
-            'gtd': 2.2,
-            'gti': 2.5,
-            'r': 3.0,
-            'gte': 2.3,
-            'match': 1.5,
-            'life': 1.2,
-            'style': 1.7,
-            
-            # General trim levels across brands
-            'sport': 1.8,
-            'se': 1.3,
-            's': 1.0,
-            'se l': 1.6,
-            'luxury': 2.0,
-            'premium': 2.0,
-            'executive': 2.2,
-            'amg': 3.0,
-            'lounge': 1.7,
-            'm sport': 2.3,
-            'edition': 1.5,
-            
-            # Drivetrain specs
-            '4wd': 1.5,
-            'awd': 1.5,
-            '4x4': 1.5,
-            'quattro': 1.5,
-            '4motion': 1.5,
-            
-            # Common value-adding features
-            'panoramic': 1.3,
-            'leather': 1.4,
-            'navigation': 1.2,
-            'tech pack': 1.3,
-            'dsg': 1.2,
+        # Create categorical spec encoding instead of hardcoded multipliers
+        # Let the ML model learn the value relationships from training data
+
+        # Define spec categories for consistent encoding
+        spec_categories = {
+            # Base/Standard trims
+            'base': ['s', 'se', 'life', 'match', 'edition'],
+
+            # Sport/Performance trims
+            'sport': ['sport', 'r-line', 'gti', 'gtd', 'r', 'gte', 'm sport', 'amg'],
+
+            # Luxury/Premium trims
+            'luxury': ['luxury', 'premium', 'executive', 'lounge', 'se l'],
+
+            # All-wheel drive variants
+            'awd': ['4wd', 'awd', '4x4', 'quattro', '4motion'],
+
+            # Technology/Comfort features
+            'tech': ['panoramic', 'leather', 'navigation', 'tech pack', 'dsg']
         }
-        
-        # Initialize spec_numeric with base value of 1.0
-        df['spec_numeric'] = 1.0
-        
-        # Apply multipliers for each trim level found in spec text
+
+        # Initialize spec_numeric with base category (1 = base, 2 = sport, 3 = luxury, 4 = awd, 5 = tech)
+        df['spec_numeric'] = 1  # Default to base
+
+        # Categorize each spec based on content
         for idx, row in df.iterrows():
             if pd.notna(row.get('spec_text')):
                 spec_text = row['spec_text'].lower()
-                
-                # Track matches for logging
-                matches = []
-                
-                # Check for each trim level
-                for trim, value in trim_levels.items():
-                    if trim in spec_text:
-                        # Multiply the base value by the trim level value
-                        # This makes multiple premium features compound
-                        df.at[idx, 'spec_numeric'] *= value
-                        matches.append(trim)
-                
-                # Cap the spec_numeric to a reasonable range
-                df.at[idx, 'spec_numeric'] = min(5.0, df.at[idx, 'spec_numeric'])
+
+                # Check categories in order of priority (sport/luxury override base)
+                if any(trim in spec_text for trim in spec_categories['luxury']):
+                    df.at[idx, 'spec_numeric'] = 3  # Luxury
+                elif any(trim in spec_text for trim in spec_categories['sport']):
+                    df.at[idx, 'spec_numeric'] = 2  # Sport
+                elif any(trim in spec_text for trim in spec_categories['awd']):
+                    df.at[idx, 'spec_numeric'] = 4  # AWD
+                elif any(trim in spec_text for trim in spec_categories['tech']):
+                    df.at[idx, 'spec_numeric'] = 5  # Tech
+                else:
+                    # Check if it matches base category, otherwise keep default
+                    if any(trim in spec_text for trim in spec_categories['base']):
+                        df.at[idx, 'spec_numeric'] = 1  # Base
                 
         # Log some statistics about spec_numeric
         logger.info(f"spec_numeric stats: min={df['spec_numeric'].min():.2f}, max={df['spec_numeric'].max():.2f}, mean={df['spec_numeric'].mean():.2f}")
@@ -757,18 +744,45 @@ def prepare_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
         df['transmission_numeric'] = df['transmission'].map(trans_map).fillna(0)
     else:
         df['transmission_numeric'] = 0
-    
-    # Select only these specific features for the model
+
+    # Add one-hot encodings for makes and models instead of ordinal encoding
+    def add_one_hot_encodings(df: pd.DataFrame) -> pd.DataFrame:
+        """Add one-hot encodings for makes and models."""
+        df_encoded = df.copy()
+
+        # Create one-hot encodings for makes
+        for make in MAKE_ENCODING.keys():
+            make_column = f"make_{make.lower().replace('-', '_').replace(' ', '_')}"
+            df_encoded[make_column] = (df_encoded['make'] == make).astype(int)
+
+        # Create one-hot encodings for models
+        for model in MODEL_ENCODING.keys():
+            model_column = f"model_{model.lower().replace('-', '_').replace(' ', '_')}"
+            df_encoded[model_column] = (df_encoded['model'] == model).astype(int)
+
+        logger.info(f"Added one-hot encodings for {len(MAKE_ENCODING)} makes and {len(MODEL_ENCODING)} models")
+        return df_encoded
+
+    # Apply one-hot encoding
+    df = add_one_hot_encodings(df)
+
+    # Get lists of one-hot encoded columns
+    make_columns = [f"make_{make.lower().replace('-', '_').replace(' ', '_')}"
+                   for make in MAKE_ENCODING.keys()]
+    model_columns = [f"model_{model.lower().replace('-', '_').replace(' ', '_')}"
+                    for model in MODEL_ENCODING.keys()]
+
+    # Select features for the model (now including one-hot encoded make/model)
     feature_columns = [
-        'asking_price', 
-        'mileage', 
-        'age', 
-        'market_value', 
-        'fuel_type_numeric', 
+        'asking_price',
+        'mileage',
+        'age',
+        'market_value',
+        'fuel_type_numeric',
         'transmission_numeric',
         'engine_size',
         'spec_numeric'
-    ]
+    ] + make_columns + model_columns
     
     # We don't include spec_text in the feature columns as it's a string
     # We'll handle it separately in the prediction functions if needed
@@ -910,54 +924,42 @@ def train_xgboost_model(df: pd.DataFrame, make: str, model: str = None) -> Tuple
 
 
 def load_or_train_model(
-    make: str, 
-    model: str, 
-    dealer_data: pd.DataFrame
+    make: str,
+    model: str,
+    dealer_data: List[Dict[str, Any]]
 ) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler]]:
-    """Load existing model or train a new one if needed
-    
+    """Load existing model-specific model or train a new one if needed
+
     Args:
         make: Car manufacturer
         model: Car model
-        dealer_data: DataFrame with dealer listings for training
-        
+        dealer_data: List of dealer listings for training
+
     Returns:
         Tuple of (XGBoost model, feature scaler) or (None, None) if error
     """
-    model_filename = f"{make}_{model or 'all'}_model.json"
-    scaler_filename = f"{make}_{model or 'all'}_scaler.pkl"
-    
-    model_path = os.path.join(MODELS_PATH, model_filename)
-    scaler_path = os.path.join(MODELS_PATH, scaler_filename)
-    
-    # Check if model and scaler exist
-    if os.path.exists(model_path) and os.path.exists(scaler_path):
-        try:
-            # Load existing model
-            loaded_model = xgb.Booster()
-            loaded_model.load_model(model_path)
-            
-            # Load scaler
-            with open(scaler_path, 'rb') as f:
-                loaded_scaler = pickle.load(f)
-                
-            logger.info(f"Loaded existing model for {make} {model or 'all'}")
-            return loaded_model, loaded_scaler
-            
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-    
+    # Try to load existing model-specific model
+    from services.model_specific_trainer import load_model_specific, train_model_specific
+
+    xgb_model, scaler = load_model_specific(make, model)
+
+    if xgb_model is not None and scaler is not None:
+        logger.info(f"Loaded existing model-specific model for {make} {model}")
+        return xgb_model, scaler
+
     # Train new model if needed
-    logger.info(f"No existing model found for {make} {model or 'all'}, training new model")
-    
+    logger.info(f"No existing model found for {make} {model}, training new model-specific model")
+
     try:
-        # Prepare training data
-        features_df = prepare_features(dealer_data)
-        training_df = prepare_training_data(features_df)
-        
-        # Train model
-        trained_model, trained_scaler = train_xgboost_model(training_df, make, model)
-        return trained_model, trained_scaler
+        success = train_model_specific(make, model, dealer_data)
+
+        if success:
+            # Load the newly trained model
+            xgb_model, scaler = load_model_specific(make, model)
+            return xgb_model, scaler
+        else:
+            logger.error(f"Failed to train model for {make} {model}")
+            return None, None
         
     except Exception as e:
         logger.error(f"Error training model: {e}")
@@ -970,23 +972,26 @@ def predict_market_values(
     xgb_model: xgb.Booster,
     scaler: StandardScaler
 ) -> pd.DataFrame:
-    """Predict market values for private seller listings
-    
+    """Predict market values for private seller listings using model-specific features
+
     Args:
         private_listings: List of car listings from private sellers
         xgb_model: Trained XGBoost model
         scaler: Feature scaler
-        
+
     Returns:
         DataFrame with listings and predicted market values
     """
-    # Prepare features for prediction
-    private_df = pd.DataFrame(private_listings)
-    
-    # Extract features - but don't include market_value since we're predicting it
-    features_df = prepare_features(private_df)
-    
-    # Get feature columns for prediction (exclude target variable)
+    # Use model-specific feature preparation (no one-hot encoding)
+    from services.model_specific_trainer import prepare_model_specific_features
+
+    features_df = prepare_model_specific_features(private_listings)
+
+    if features_df.empty:
+        logger.warning("No valid features prepared for prediction")
+        return pd.DataFrame()
+
+    # Get feature columns for prediction (model-specific, no make/model encoding)
     feature_columns = ['asking_price', 'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric']
     
     # Check if all required columns exist in the DataFrame, add any missing ones

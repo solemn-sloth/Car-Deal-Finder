@@ -142,6 +142,179 @@ for make, models in TARGET_VEHICLES_BY_MAKE.items():
     for model in models:
         TARGET_VEHICLES.append({"make": make, "model": model})
 
+# Daily Training Model Groups - Balanced for similar training times per day
+# Each day gets a mix of high-volume (popular) and low-volume (niche) models
+# to ensure roughly equal scraping/training duration across all 14 days
+DAILY_TRAINING_GROUPS = {
+    1: [  # Day 1: Mix of popular + niche models
+        ("BMW", "3 Series"),           # HIGH popularity
+        ("Honda", "Jazz"),             # MEDIUM
+        ("BMW", "5 Series"),           # MEDIUM
+        ("Mini", "Hatch"),             # MEDIUM
+        ("Skoda", "Octavia"),          # MEDIUM
+        ("Porsche", "911"),            # LOW
+        ("Tesla", "Model 3"),          # LOW
+        ("Jaguar", "F-PACE"),          # LOW
+        ("DS Automobiles", "DS 3"),    # LOW
+        ("Abarth", "595")              # LOW
+    ],
+    2: [  # Day 2: Balance high-volume models across days
+        ("Audi", "A3"),                # HIGH popularity
+        ("Ford", "Fiesta"),            # HIGH popularity
+        ("Honda", "Civic"),            # MEDIUM
+        ("Toyota", "Auris"),           # MEDIUM
+        ("SEAT", "Leon"),              # MEDIUM
+        ("Porsche", "Macan"),          # LOW
+        ("Lexus", "CT"),               # LOW
+        ("Jaguar", "XE"),              # LOW
+        ("Dacia", "Duster"),           # LOW
+        ("Alfa Romeo", "Giulietta")    # LOW
+    ],
+    3: [  # Day 3
+        ("Volkswagen", "Golf"),        # HIGH popularity
+        ("Vauxhall", "Corsa"),         # HIGH popularity
+        ("BMW", "1 Series"),           # MEDIUM
+        ("Audi", "Q3"),                # MEDIUM
+        ("Mercedes-Benz", "C Class"),  # MEDIUM
+        ("Porsche", "Cayenne"),        # LOW
+        ("Jaguar", "XF"),              # LOW
+        ("Jaguar", "E-PACE"),          # LOW
+        ("Dacia", "Sandero Stepway"), # LOW
+        ("Citroen", "C1")              # LOW
+    ],
+    4: [  # Day 4
+        ("Toyota", "Yaris"),           # HIGH popularity
+        ("Nissan", "Qashqai"),         # HIGH popularity
+        ("Audi", "A4"),                # MEDIUM
+        ("BMW", "2 Series"),           # MEDIUM
+        ("Mini", "Countryman"),        # MEDIUM
+        ("Jaguar", "F-Type"),          # LOW
+        ("Kia", "Venga"),              # LOW
+        ("Citroen", "C3"),             # LOW
+        ("Citroen", "C4 Cactus"),      # LOW
+        ("Citroen", "DS3")             # LOW
+    ],
+    5: [  # Day 5
+        ("Mercedes-Benz", "A Class"),  # HIGH popularity
+        ("Ford", "Focus"),             # MEDIUM
+        ("Volkswagen", "Polo"),        # MEDIUM
+        ("Toyota", "C-HR"),            # MEDIUM
+        ("Mazda", "CX-5"),             # MEDIUM
+        ("Kia", "Sportage"),           # MEDIUM
+        ("Fiat", "500"),               # LOW
+        ("Fiat", "500X"),              # LOW
+        ("Ford", "Ka"),                # LOW
+        ("Volvo", "XC40")              # LOW (was missing)
+    ],
+    6: [  # Day 6
+        ("Vauxhall", "Astra"),         # HIGH popularity
+        ("BMW", "X1"),                 # MEDIUM
+        ("Audi", "A1"),                # MEDIUM
+        ("Mercedes-Benz", "GLC"),      # MEDIUM
+        ("Skoda", "Fabia"),            # MEDIUM
+        ("Peugeot", "208"),            # MEDIUM
+        ("Ford", "B-Max"),             # LOW
+        ("Ford", "C-Max"),             # LOW
+        ("Ford", "EcoSport"),          # LOW
+        ("Ford", "Kuga")               # LOW
+    ],
+    7: [  # Day 7
+        ("SEAT", "Ibiza"),             # MEDIUM
+        ("BMW", "4 Series"),           # MEDIUM
+        ("Audi", "A5"),                # MEDIUM
+        ("Mercedes-Benz", "E Class"),  # MEDIUM
+        ("Toyota", "RAV4"),            # MEDIUM
+        ("Nissan", "Juke"),            # MEDIUM
+        ("Ford", "Mondeo"),            # LOW
+        ("Ford", "Puma"),              # LOW
+        ("Ford", "Ranger"),            # LOW
+        ("Honda", "CR-V")              # LOW
+    ],
+    8: [  # Day 8
+        ("BMW", "X3"),                 # MEDIUM
+        ("Audi", "Q2"),                # MEDIUM
+        ("Mercedes-Benz", "GLA"),      # MEDIUM
+        ("Vauxhall", "ADAM"),          # MEDIUM
+        ("Toyota", "Corolla"),         # MEDIUM
+        ("Nissan", "Micra"),           # MEDIUM
+        ("Honda", "HR-V"),             # LOW
+        ("Hyundai", "i10"),            # LOW
+        ("Hyundai", "TUCSON"),         # LOW
+        ("Hyundai", "KONA")            # LOW
+    ],
+    9: [  # Day 9
+        ("BMW", "7 Series"),           # MEDIUM
+        ("Audi", "A4 Avant"),          # MEDIUM
+        ("Mercedes-Benz", "CLA"),      # MEDIUM
+        ("Vauxhall", "Crossland X"),   # MEDIUM
+        ("Toyota", "Prius"),           # MEDIUM
+        ("Nissan", "Note"),            # MEDIUM
+        ("Hyundai", "i20"),            # LOW
+        ("Hyundai", "i30"),            # LOW
+        ("Kia", "Picanto"),            # LOW
+        ("Kia", "Ceed")                # LOW
+    ],
+    10: [ # Day 10
+        ("BMW", "4 Series Gran Coupe"), # MEDIUM
+        ("Audi", "A6 Saloon"),         # MEDIUM
+        ("Mercedes-Benz", "B Class"),  # MEDIUM
+        ("Vauxhall", "Grandland X"),   # MEDIUM
+        ("Toyota", "AYGO"),            # MEDIUM
+        ("Nissan", "X-Trail"),         # MEDIUM
+        ("Kia", "Niro"),               # LOW
+        ("Kia", "Rio"),                # LOW
+        ("Mazda", "Mazda2"),           # LOW
+        ("Mazda", "Mazda3")            # LOW
+    ],
+    11: [ # Day 11
+        ("BMW", "M4"),                 # MEDIUM (niche but BMW)
+        ("Audi", "Q5"),                # MEDIUM
+        ("Mercedes-Benz", "GLE"),      # MEDIUM
+        ("Vauxhall", "Insignia"),      # MEDIUM
+        ("SEAT", "Arona"),             # MEDIUM
+        ("Peugeot", "2008"),           # MEDIUM
+        ("Mazda", "CX-3"),             # LOW
+        ("Mazda", "MX-5"),             # LOW
+        ("Mini", "Clubman"),           # LOW
+        ("Mini", "Convertible")        # LOW
+    ],
+    12: [ # Day 12
+        ("Audi", "Q7"),                # MEDIUM
+        ("Audi", "S3"),                # MEDIUM
+        ("Vauxhall", "Meriva"),        # MEDIUM
+        ("SEAT", "Ateca"),             # MEDIUM
+        ("Peugeot", "3008"),           # MEDIUM
+        ("Mitsubishi", "Outlander"),   # LOW
+        ("Mitsubishi", "L200"),        # LOW
+        ("Skoda", "Karoq"),            # LOW
+        ("Suzuki", "Swift"),           # LOW
+        ("Volvo", "V60")               # LOW (was missing)
+    ],
+    13: [ # Day 13
+        ("Audi", "TT"),                # MEDIUM
+        ("Vauxhall", "Mokka"),         # MEDIUM
+        ("Vauxhall", "Mokka X"),       # MEDIUM
+        ("Peugeot", "108"),            # MEDIUM
+        ("Peugeot", "308"),            # MEDIUM
+        ("Suzuki", "Vitara"),          # LOW
+        ("Renault", "Captur"),         # LOW
+        ("Renault", "Clio"),           # LOW
+        ("Renault", "Kadjar"),         # LOW
+        ("Volvo", "XC90")              # LOW (was missing)
+    ],
+    14: [ # Day 14 - Final day (9 remaining models)
+        ("Vauxhall", "Zafira Tourer"), # MEDIUM
+        ("Renault", "Megane"),         # MEDIUM
+        ("Volkswagen", "Tiguan"),      # MEDIUM
+        ("Volkswagen", "T-Roc"),       # MEDIUM
+        ("Volkswagen", "Passat"),      # LOW
+        ("Volkswagen", "up!"),         # LOW
+        ("Volkswagen", "Scirocco"),    # LOW
+        ("Volvo", "XC60"),             # LOW
+        ("Volvo", "V40")               # LOW
+    ]
+}
+
 def build_autotrader_url(make, model, search_criteria=None):
     """
     Build AutoTrader search URL from vehicle make/model and search criteria.

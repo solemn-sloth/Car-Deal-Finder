@@ -71,46 +71,62 @@ proxy = proxy_manager.get_proxy()  # Gets fresh proxy with rotation
 
 ## 🤖 Analytics System
 
-### Universal ML Model
-The system uses a single XGBoost model trained on data from all vehicle makes and models:
+### Model-Specific ML Architecture
+The system uses **139 individual XGBoost models** (one per car model) with a **distributed daily training system**:
 
-- **Cross-Vehicle Learning**: Model learns patterns across BMW, Audi, Ford, etc.
-- **Standardized Features**: Universal encoding system for makes, models, fuel types, specs
-- **Enhanced Accuracy**: More training data leads to better predictions than individual models
-- **Efficient Processing**: Single model deployment reduces complexity and memory usage
+- **Specialized Learning**: Each car model gets its own ML model trained only on relevant data
+- **Daily Training**: 10 models retrained per day in a 14-day rotating cycle
+- **Balanced Workload**: Popular models distributed evenly across days for consistent training times
+- **Clean Features**: 8 focused features per model (no complex one-hot encoding needed)
+
+### Daily Training System
+```
+Day 1: BMW 3-Series, Honda Jazz, Porsche 911, Tesla Model 3... (10 models)
+Day 2: Audi A3, Ford Fiesta, Honda Civic, Lexus CT... (10 models)
+...
+Day 14: VW Tiguan, Volvo XC60, Renault Megane... (9 models)
+```
+
+**Benefits:**
+- **🎯 Specialized**: Each model learns its specific market patterns
+- **⚡ Fast Training**: 10 models/day vs 139 models/week
+- **🔄 Fresh Data**: Models updated every 14 days
+- **🛡️ Isolated**: Model failures don't affect others
+
+### Model Storage Structure
+```
+archive/ml_models/
+├── audi/a3/model.xgb + scaler.pkl
+├── bmw/3_series/model.xgb + scaler.pkl
+├── ford/fiesta/model.xgb + scaler.pkl
+└── ... (139 model pairs in 30 make folders)
+```
 
 ### Feature Engineering Pipeline
 ```python
-# Universal feature set used across all vehicles
+# Model-specific feature set (8 focused features)
 FEATURE_COLUMNS = [
-    'asking_price', 'mileage', 'age',           # Core metrics
-    'make_encoded', 'model_encoded',            # Vehicle identity
-    'fuel_type_numeric', 'transmission_numeric', # Drivetrain
-    'engine_size', 'spec_numeric'               # Performance & trim
+    'asking_price', 'mileage', 'age', 'market_value',    # Core metrics
+    'fuel_type_numeric', 'transmission_numeric',         # Drivetrain
+    'engine_size', 'spec_numeric'                        # Performance & trim
 ]
+# No make/model encoding needed - each model is specialized!
 ```
 
 ### XGBoost Configuration
 - **Objective**: Regression with squared error loss
 - **Hyperparameters**: Optimized depth (6), learning rate (0.1), subsample (0.8)
 - **Regularization**: Column sampling and minimum child weight to prevent overfitting
-- **Early Stopping**: 15 rounds to prevent overtraining
+- **Early Stopping**: 10 rounds to prevent overtraining
+- **Minimum Data**: 50 samples required before training
 
-### ML Model Configuration
+### Daily Training Management
 ```python
-# XGBoost hyperparameters optimized for vehicle data
-UNIVERSAL_ML_CONFIG = {
-    'min_training_samples': 50,      # Minimum samples to train
-    'xgboost_params': {
-        'max_depth': 6,              # Tree depth
-        'eta': 0.1,                  # Learning rate
-        'subsample': 0.8,            # Row sampling
-        'colsample_bytree': 0.8,     # Feature sampling
-    },
-    'training_params': {
-        'num_boost_round': 150,      # Training iterations
-        'early_stopping_rounds': 15,  # Overfitting prevention
-    }
+# Hardcoded balanced groups in config/config.py
+DAILY_TRAINING_GROUPS = {
+    1: [("BMW", "3 Series"), ("Honda", "Jazz"), ...],  # Mix of popular + niche
+    2: [("Audi", "A3"), ("Ford", "Fiesta"), ...],      # Different balanced mix
+    # ... up to day 14
 }
 ```
 
@@ -191,9 +207,24 @@ python src/analyser.py --model "3 Series"
 
 # Run smart grouped scraping with notifications
 python src/scraping.py
+```
 
-# Run weekly model training
-python services/ML_trainer.py
+#### ML Training & Management
+```bash
+# Run daily model training (10 models per day)
+python ml/daily_training.py
+
+# See which models would be trained today
+python ml/daily_training.py --dry-run
+
+# Validate training group assignments
+python ml/validate_groups.py
+
+# Show specific day breakdown
+python ml/validate_groups.py --day 5
+
+# Training with options
+python ml/daily_training.py --max-pages 2 --verbose
 ```
 
 #### Testing & Development
@@ -204,22 +235,28 @@ python src/analyser.py --test --model "Focus"
 # Scraping with filters
 python src/scraping.py --make Ford --model Fiesta
 
-# Test weekly training
-python services/ML_trainer.py --test
-
 # Validate API connections
 python services/network_requests.py
 ```
 
 ### Core System Components
+
+#### Data Collection & Processing
 - **`services/network_requests.py`** - GraphQL API client with mileage splitting and anti-detection
 - **`services/stealth_orchestrator.py`** - Proxy management with Webshare API integration and anti-fingerprinting
 - **`services/browser_scraper.py`** - 6-worker Playwright system for parallel price marker extraction
-- **`services/ML_model.py`** - XGBoost training and prediction system for all vehicle types
 - **`src/analyser.py`** - Main analysis pipeline coordinating scraping and ML prediction
-- **`services/ML_trainer.py`** - Automated weekly model training and performance monitoring
 - **`src/scraping.py`** - Smart grouped scraping orchestration with deal notification
-- **`config/config.py`** - Centralized configuration with environment variables and scheduling functions
-- **`config/encodings.py`** - Standardized encoding mappings for makes, models, and specifications
+
+#### ML Training & Prediction
+- **`services/daily_trainer.py`** - Orchestrates daily training of 10 models in 14-day cycles
+- **`services/model_specific_trainer.py`** - Individual model training with specialized features
+- **`ml/daily_training.py`** - CLI tool for running and monitoring daily training
+- **`ml/validate_groups.py`** - Validation utility for training group assignments
+
+#### Configuration & Data
+- **`config/config.py`** - Centralized configuration with hardcoded balanced training groups
+- **`config/encodings.py`** - Legacy encoding mappings (superseded by model-specific approach)
+- **`archive/ml_models/`** - 139 trained models organized in make/model subfolders
 
 This system provides automated vehicle deal finding, combining web scraping techniques with machine learning to identify profitable opportunities in the used car market.
