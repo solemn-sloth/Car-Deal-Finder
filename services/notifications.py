@@ -9,7 +9,7 @@ from typing import List, Dict, Optional, Tuple
 import os
 from dotenv import load_dotenv
 from pathlib import Path
-from storage import SupabaseStorage
+from src.storage import SupabaseStorage
 
 # Load environment variables from config folder
 config_path = Path(os.path.dirname(os.path.dirname(__file__))) / 'config' / '.env'

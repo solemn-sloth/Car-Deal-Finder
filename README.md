@@ -131,6 +131,42 @@ DAILY_TRAINING_GROUPS = {
 ```
 
 
+## 🤖 Daily Automation Workflow
+
+The system provides a unified entry point (`main.py`) for complete daily automation:
+
+### Training-First Architecture
+```
+Daily Automation Workflow:
+
+1. 🧠 PHASE 1: Daily Model Training
+   ├── Train 10 models from today's balanced group
+   ├── Models refreshed every 14 days in rotating cycle
+   ├── Clean model storage in organized sub-folders
+   └── Automatic cycle day advancement
+
+2. 🔍 PHASE 2: Deal Finding & Analysis
+   ├── Load existing trained models (no on-demand training)
+   ├── Scrape all vehicle makes/models with GraphQL API
+   ├── Predict market values using model-specific features
+   ├── Filter for profitable deals with statistical confidence
+   ├── Send email notifications via Resend API
+   └── Store results in Supabase database
+
+3. 📊 PHASE 3: Reporting & Logging
+   ├── Unified logging across both phases
+   ├── Success/failure tracking with error handling
+   ├── Performance metrics and duration tracking
+   └── Email summaries for unattended operation
+```
+
+### Key Benefits
+- **🎯 Single Command**: `python main.py` handles everything
+- **⚡ Training-First**: Fresh models available before analysis
+- **🔄 Automated Cycles**: 14-day model refresh schedule
+- **🛡️ Fault Tolerant**: Continues on individual model failures
+- **📈 Production Ready**: Designed for unattended cron operation
+
 ## ⚙️ Setup & Usage
 
 ### Installation & Requirements
@@ -197,21 +233,39 @@ WEBSHARE_PROXY_CONFIG = {
 
 ### Running Commands
 
-#### Basic Operations
+#### 🚀 Daily Automation (Main Entry Point)
 ```bash
-# Run complete analysis for all configured vehicles
-python src/analyser.py
+# Full daily automation - training + deal finding
+python src/main.py
 
-# Analyze specific make/model
-python src/analyser.py --model "3 Series"
+# Run only daily model training (10 models per day)
+python src/main.py --training-only
 
-# Run smart grouped scraping with notifications
-python src/scraping.py
+# Run only deal finding & analysis
+python src/main.py --scraping-only
+
+# Show what would be done without executing
+python src/main.py --dry-run
+
+# Enable detailed logging for debugging
+python src/main.py --verbose
+
+# Test single model in full production mode
+python src/main.py --model "3 Series"
+
+# Force retrain specific model + run deal finding
+python src/main.py --model "3 Series" --force-retrain
+
+# Force retrain only (no deal finding)
+python src/main.py --training-only --model "3 Series" --force-retrain
+
+# Cron job example for daily automation
+0 2 * * * cd /path/to/car-deal-finder && python src/main.py >> logs/daily.log 2>&1
 ```
 
-#### ML Training & Management
+#### 🧠 ML Training & Management
 ```bash
-# Run daily model training (10 models per day)
+# Standalone daily model training (10 models per day)
 python ml/daily_training.py
 
 # See which models would be trained today
@@ -227,16 +281,23 @@ python ml/validate_groups.py --day 5
 python ml/daily_training.py --max-pages 2 --verbose
 ```
 
-#### Testing & Development
+#### 🧪 Testing & Development
 ```bash
-# Test mode with specific model
-python src/analyser.py --test --model "Focus"
+# Test single model workflow (production mode with DB/notifications)
+python src/main.py --model "Focus" --dry-run          # Preview what would happen
+python src/main.py --model "Focus"                    # Run full production test
 
-# Scraping with filters
-python src/scraping.py --make Ford --model Fiesta
+# Force retrain and test specific model
+python src/main.py --model "Focus" --force-retrain --dry-run  # Preview forced retrain
+python src/main.py --model "Focus" --force-retrain            # Execute forced retrain + test
 
-# Validate API connections
-python services/network_requests.py
+# Test training only for specific model
+python src/main.py --training-only --model "Focus" --force-retrain
+
+# Legacy individual operations
+python src/analyser.py --model "3 Series"             # Direct analysis
+python src/scraping.py --make Ford --model Fiesta     # Direct scraping
+python services/network_requests.py                   # API validation
 ```
 
 ### Core System Components
@@ -254,9 +315,13 @@ python services/network_requests.py
 - **`ml/daily_training.py`** - CLI tool for running and monitoring daily training
 - **`ml/validate_groups.py`** - Validation utility for training group assignments
 
+#### Automation & Orchestration
+- **`src/main.py`** - Unified daily automation entry point with training-first workflow
+
 #### Configuration & Data
 - **`config/config.py`** - Centralized configuration with hardcoded balanced training groups
+- **`config/daily_training_config.json`** - Daily training cycle state and configuration
 - **`config/encodings.py`** - Legacy encoding mappings (superseded by model-specific approach)
 - **`archive/ml_models/`** - 139 trained models organized in make/model subfolders
 
-This system provides automated vehicle deal finding, combining web scraping techniques with machine learning to identify profitable opportunities in the used car market.
+This system provides automated vehicle deal finding, combining web scraping techniques with specialized machine learning models to identify profitable opportunities in the used car market.

@@ -182,9 +182,13 @@ class DailyModelTrainingOrchestrator:
             logger.error(f"Error training {make} {model}: {e}")
             return False
 
-    def run_daily_training(self) -> Dict[str, Any]:
+    def run_daily_training(self, target_model: str = None, force_retrain: bool = False) -> Dict[str, Any]:
         """
         Run today's batch of model training.
+
+        Args:
+            target_model: Target specific model for training (e.g., "3 Series")
+            force_retrain: Force retraining regardless of daily schedule
 
         Returns:
             Dict with training results summary
@@ -195,7 +199,30 @@ class DailyModelTrainingOrchestrator:
 
         logger.info("🚀 Starting daily model training")
 
-        todays_models = self.get_todays_models()
+        # Get models to train based on parameters
+        if target_model:
+            # Filter for specific model across all makes
+            from config.config import TARGET_VEHICLES_BY_MAKE
+            todays_models = []
+            for make, models in TARGET_VEHICLES_BY_MAKE.items():
+                if target_model in models:
+                    todays_models.append({
+                        'make': make,
+                        'model': target_model,
+                        'key': f"{make.lower()}_{target_model.lower().replace(' ', '_').replace('-', '_')}"
+                    })
+
+            if force_retrain:
+                logger.info(f"🔄 Force retraining model: {target_model} (across {len(todays_models)} makes)")
+            else:
+                logger.info(f"🎯 Training model: {target_model} (across {len(todays_models)} makes)")
+        else:
+            # Get today's scheduled models
+            todays_models = self.get_todays_models()
+            if force_retrain:
+                logger.info(f"🔄 Force retraining Day {self.config['current_cycle_day']} models ({len(todays_models)} models)")
+            else:
+                logger.info(f"📅 Training Day {self.config['current_cycle_day']} models ({len(todays_models)} models)")
 
         results = {
             'date': datetime.now().isoformat(),
@@ -235,13 +262,16 @@ class DailyModelTrainingOrchestrator:
         return results
 
 
-def run_daily_training(max_pages_per_model: int = None, verify_ssl: bool = False) -> Dict[str, Any]:
+def run_daily_training(max_pages_per_model: int = None, verify_ssl: bool = False,
+                      target_model: str = None, force_retrain: bool = False) -> Dict[str, Any]:
     """
     Main entry point for daily training.
 
     Args:
         max_pages_per_model: Maximum pages to scrape per model
         verify_ssl: Whether to verify SSL certificates
+        target_model: Target specific model for training (e.g., "3 Series")
+        force_retrain: Force retraining regardless of daily schedule
 
     Returns:
         Dict with training results
@@ -251,7 +281,7 @@ def run_daily_training(max_pages_per_model: int = None, verify_ssl: bool = False
         verify_ssl=verify_ssl
     )
 
-    return orchestrator.run_daily_training()
+    return orchestrator.run_daily_training(target_model=target_model, force_retrain=force_retrain)
 
 
 if __name__ == "__main__":

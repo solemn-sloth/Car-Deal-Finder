@@ -928,18 +928,18 @@ def load_or_train_model(
     model: str,
     dealer_data: List[Dict[str, Any]]
 ) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler]]:
-    """Load existing model-specific model or train a new one if needed
+    """Load existing model-specific model (training disabled for automated workflow)
 
     Args:
         make: Car manufacturer
         model: Car model
-        dealer_data: List of dealer listings for training
+        dealer_data: List of dealer listings (unused - kept for compatibility)
 
     Returns:
-        Tuple of (XGBoost model, feature scaler) or (None, None) if error
+        Tuple of (XGBoost model, feature scaler) or (None, None) if model not found
     """
     # Try to load existing model-specific model
-    from services.model_specific_trainer import load_model_specific, train_model_specific
+    from services.model_specific_trainer import load_model_specific
 
     xgb_model, scaler = load_model_specific(make, model)
 
@@ -947,23 +947,11 @@ def load_or_train_model(
         logger.info(f"Loaded existing model-specific model for {make} {model}")
         return xgb_model, scaler
 
-    # Train new model if needed
-    logger.info(f"No existing model found for {make} {model}, training new model-specific model")
+    # Model not found - no on-demand training in automated workflow
+    logger.warning(f"No existing model found for {make} {model}. Models should be trained via daily training schedule.")
+    logger.warning(f"Run 'python ml/daily_training.py' or 'python main.py --training-only' to train models.")
 
-    try:
-        success = train_model_specific(make, model, dealer_data)
-
-        if success:
-            # Load the newly trained model
-            xgb_model, scaler = load_model_specific(make, model)
-            return xgb_model, scaler
-        else:
-            logger.error(f"Failed to train model for {make} {model}")
-            return None, None
-        
-    except Exception as e:
-        logger.error(f"Error training model: {e}")
-        return None, None
+    return None, None
 
 
 # Prediction and Deal Analysis Functions
