@@ -93,6 +93,15 @@ MILEAGE_RANGES_FOR_SPLITTING = [
 # Enable mileage splitting by default to bypass listing limits
 ENABLE_MILEAGE_SPLITTING = True
 
+# Parallel API Scraping Configuration
+PARALLEL_API_SCRAPING = {
+    'enabled': True,  # Enable parallel processing by default
+    'max_workers': 5,  # One worker per mileage range
+    'target_rate_per_minute': 300,  # Combined rate limit for all workers
+    'fallback_to_sequential': True,  # Fallback if parallel fails
+    'use_proxy_per_worker': True  # Each worker gets unique proxy
+}
+
 # Target vehicle makes/models - Organized by make for better maintainability
 TARGET_VEHICLES_BY_MAKE = {
     "Abarth": ["595"],

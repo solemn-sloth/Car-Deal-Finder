@@ -15,9 +15,9 @@ from collections import defaultdict
 
 # Core scraping imports
 from services.network_requests import AutoTraderAPIClient
-from services.proxy_rotation import ProxyManager
-from services.data_adapter import NetworkDataAdapter
-from src.ML_analyser import enhanced_analyse_listings, enhanced_keep_listing
+from services.stealth_orchestrator import ProxyManager
+from services.network_requests import NetworkDataAdapter
+from src.analyser import enhanced_analyse_listings, enhanced_keep_listing
 from config.config import TARGET_VEHICLES_BY_MAKE, VEHICLE_SEARCH_CRITERIA
 
 # Pipeline imports

@@ -5,78 +5,22 @@ import time
 import random
 import ssl
 import secrets
-from typing import List, Dict, Optional
+import logging
+from typing import List, Dict, Optional, Callable, Any
 from requests.packages.urllib3.util.retry import Retry
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import queue
+from services.stealth_orchestrator import FingerprintGenerator, CustomHTTPAdapter
 
 # Disable SSL warnings globally to avoid CloudFlare issues
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-class CustomHTTPAdapter(requests.adapters.HTTPAdapter):
-    """Custom adapter with specific cipher suites and TLS versions to mimic browser TLS fingerprints"""
-    def __init__(self, *args, verify_ssl=False, **kwargs):
-        self.verify_ssl = verify_ssl
-        super().__init__(*args, **kwargs)
-        
-    def init_poolmanager(self, *args, **kwargs):
-        # Use common client-side cipher suites
-        kwargs['ssl_context'] = self._create_ssl_context()
-        return super().init_poolmanager(*args, **kwargs)
-    
-    def _create_ssl_context(self):
-        context = ssl.create_default_context()
-        
-        # CloudFlare specifically looks for certain cipher suites and TLS features
-        # Randomize cipher order to avoid static TLS fingerprint detection
-        base_ciphers = [
-            'ECDHE-ECDSA-AES128-GCM-SHA256',
-            'ECDHE-RSA-AES128-GCM-SHA256',
-            'ECDHE-ECDSA-AES256-GCM-SHA384',
-            'ECDHE-RSA-AES256-GCM-SHA384',
-            'ECDHE-ECDSA-CHACHA20-POLY1305',
-            'ECDHE-RSA-CHACHA20-POLY1305',
-            'ECDHE-RSA-AES128-SHA',
-            'ECDHE-RSA-AES256-SHA'
-        ]
-        
-        # Randomize cipher order for each new connection to avoid fingerprinting
-        randomized_ciphers = base_ciphers.copy()
-        secrets.SystemRandom().shuffle(randomized_ciphers)
-        
-        context.set_ciphers(':'.join(randomized_ciphers))
-        
-        # Set TLS version to 1.2 (CloudFlare sometimes has issues with TLS 1.3)
-        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
-        context.options |= ssl.OP_NO_COMPRESSION  # Disable TLS compression for better mimicking browsers
-        
-        # Disable SSL verification if requested
-        if not self.verify_ssl:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-        else:
-            # Ensure hostname checking is enabled when SSL verification is on
-            context.check_hostname = True
-            context.verify_mode = ssl.CERT_REQUIRED
-        
-        # Apply elliptic curves that browsers use - randomize order
-        try:
-            import ctypes
-            libssl = ctypes.cdll.LoadLibrary(ssl._ssl.__file__)
-            libssl.SSL_CTX_set1_curves_list.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-            libssl.SSL_CTX_set1_curves_list.restype = ctypes.c_int
-            
-            # Randomize elliptic curve order to avoid static fingerprint
-            base_curves = ["X25519", "secp256r1", "prime256v1", "secp384r1"]
-            randomized_curves = base_curves.copy()
-            secrets.SystemRandom().shuffle(randomized_curves)
-            
-            curves = ":".join(randomized_curves).encode()
-            libssl.SSL_CTX_set1_curves_list(context._ctx, curves)
-        except (AttributeError, OSError):
-            # If we can't set up the curves, continue anyway
-            pass
-            
-        return context
+logger = logging.getLogger(__name__)
+
+# CustomHTTPAdapter is now imported from stealth_orchestrator.py for consistency
 
 def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
     """
@@ -101,44 +45,299 @@ def process_autotrader_image_url(raw_url: str, size: str = "w480h360") -> str:
     
     return raw_url
 
+
+# ──────────────────────────────────────────────────────────────────
+# Parallel API Scraping Classes
+# ──────────────────────────────────────────────────────────────────
+
+@dataclass
+class APITask:
+    """Represents an API scraping task for a specific mileage range."""
+    make: str
+    model: str
+    postcode: str
+    min_year: int
+    max_year: int
+    min_mileage: int
+    max_mileage: int
+    max_pages: Optional[int] = None
+
+    def __str__(self):
+        return f"{self.make}_{self.model}_{self.min_mileage}-{self.max_mileage}"
+
+
+class ParallelCoordinator:
+    """
+    Coordinates parallel API workers with anti-detection features.
+    Manages worker coordination, proxy distribution, rate limiting, and progress tracking.
+    """
+
+    def __init__(self, target_rate_per_minute: int = 300, max_workers: int = 5):
+        """
+        Initialize coordinator.
+
+        Args:
+            target_rate_per_minute: Global rate limit for all workers combined
+            max_workers: Maximum number of parallel workers
+        """
+        self.target_rate_per_minute = target_rate_per_minute
+        self.max_workers = max_workers
+        self.work_queue = queue.Queue()
+        self.results = {}
+        self.completed_count = 0
+        self.failed_workers = set()
+        self.results_lock = threading.Lock()
+        self.last_result_status = "⚠️ Starting up"
+
+    def add_work(self, tasks: List[APITask]):
+        """Add tasks to work queue for parallel distribution."""
+        for task in tasks:
+            self.work_queue.put(task)
+
+    def get_next_work(self, worker_id: int, timeout: float = 1) -> Optional[APITask]:
+        """Get next task for worker, respecting worker health."""
+        if worker_id in self.failed_workers:
+            return None
+
+        try:
+            return self.work_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def report_result(self, task_id: str, result: Dict[str, Any], worker_id: int):
+        """Report result from worker, track failures for intelligent backoff."""
+        with self.results_lock:
+            self.results[task_id] = result
+            self.completed_count += 1
+
+            # Store result status for progress reporting
+            self.last_result_status = self._get_result_status(result)
+
+            # Check if this worker should be paused due to detection
+            if self._is_worker_detected(result):
+                self.failed_workers.add(worker_id)
+                logger.debug(f"Worker {worker_id} detected as blocked, pausing")
+
+        # Mark the task as done in the queue
+        self.work_queue.task_done()
+
+    def _get_result_status(self, result: Dict[str, Any]) -> str:
+        """Get API-specific status indicator."""
+        if not result.get('success', False):
+            error = result.get('error', 'Unknown error')
+            if 'cloudflare' in error.lower():
+                return "❌ CloudFlare blocked"
+            elif '403' in error:
+                return "❌ 403 Forbidden"
+            elif 'timeout' in error.lower():
+                return "❌ Request timeout"
+            else:
+                return f"❌ {error[:40]}"
+
+        car_count = result.get('metadata', {}).get('car_count', 0)
+        mileage_range = result.get('metadata', {}).get('mileage_range', '')
+        return f"✅ {car_count} cars ({mileage_range})"
+
+    def _is_worker_detected(self, result: Dict[str, Any]) -> bool:
+        """Check if API worker was detected/blocked."""
+        if result.get('success', True):
+            return False
+
+        error = result.get('error', '').lower()
+        return any(keyword in error for keyword in [
+            'cloudflare', '403', 'forbidden', 'blocked', 'challenge',
+            'too many requests', 'rate limit'
+        ])
+
+    def process_batch(self, tasks: List[APITask], progress_callback: Optional[Callable] = None,
+                     test_mode: bool = False, max_tasks_per_worker: int = 1) -> Dict[str, Any]:
+        """
+        Process batch of tasks using parallel workers.
+
+        Args:
+            tasks: List of tasks to process
+            progress_callback: Optional callback for progress updates
+            test_mode: Skip delays in test mode
+            max_tasks_per_worker: Maximum tasks per worker before restart
+
+        Returns:
+            Dictionary mapping task IDs to results
+        """
+        total_tasks = len(tasks)
+
+        logger.info(f"🚀 Starting parallel coordination with {self.max_workers} workers")
+        logger.info(f"📊 Processing {total_tasks} tasks")
+
+        # Initialize proxy manager if available
+        proxy_manager = None
+        try:
+            from services.stealth_orchestrator import ProxyManager
+            proxy_manager = ProxyManager()
+        except ImportError:
+            logger.warning("ProxyManager not available, workers will use no proxy")
+
+        # Add work to queue
+        self.add_work(tasks)
+
+        def worker_thread(worker_id: int):
+            """Worker thread that processes API tasks."""
+            try:
+                # Get dedicated proxy for this worker
+                worker_proxy = None
+                if proxy_manager:
+                    worker_proxy = proxy_manager.get_proxy_for_worker(worker_id)
+
+                # Initialize API client for this worker with unified fingerprinting
+                api_client = AutoTraderAPIClient(
+                    proxy=worker_proxy,
+                    verify_ssl=False,
+                    worker_id=worker_id  # Pass worker_id for consistent fingerprinting
+                )
+
+                # Fingerprint is automatically set up in AutoTraderAPIClient constructor
+
+                logger.debug(f"API Worker {worker_id} initialized with proxy: {worker_proxy and worker_proxy[:20]+'...'}")
+
+                # Process tasks from queue
+                tasks_processed = 0
+                consecutive_empty_gets = 0
+
+                while tasks_processed < max_tasks_per_worker:
+                    task = self.get_next_work(worker_id, timeout=0.2)
+                    if task is None:
+                        consecutive_empty_gets += 1
+                        if consecutive_empty_gets >= 3:  # No work available
+                            break
+                        continue
+
+                    consecutive_empty_gets = 0
+
+                    try:
+                        logger.debug(f"Worker {worker_id} processing: {task.make} {task.model} "
+                                   f"({task.min_mileage}-{task.max_mileage} miles)")
+
+                        start_time = time.time()
+
+                        # Use the API client for this mileage range
+                        cars = api_client.get_all_cars(
+                            make=task.make,
+                            model=task.model,
+                            postcode=task.postcode,
+                            min_year=task.min_year,
+                            max_year=task.max_year,
+                            min_mileage=task.min_mileage,
+                            max_mileage=task.max_mileage,
+                            max_pages=task.max_pages
+                        )
+
+                        processing_time = time.time() - start_time
+
+                        result = {
+                            'success': True,
+                            'data': cars,
+                            'metadata': {
+                                'worker_id': worker_id,
+                                'mileage_range': f"{task.min_mileage}-{task.max_mileage}",
+                                'car_count': len(cars),
+                                'processing_time': round(processing_time, 2),
+                                'proxy_used': worker_proxy and worker_proxy[:20] + '...' or 'none'
+                            }
+                        }
+
+                        task_id = str(task)
+                        self.report_result(task_id, result, worker_id)
+
+                        logger.debug(f"Worker {worker_id} completed: {len(cars)} cars in {processing_time:.1f}s")
+
+                        # Update progress callback
+                        if progress_callback:
+                            progress_callback(self.completed_count, total_tasks, self.last_result_status)
+
+                        tasks_processed += 1
+
+                        # Rate limiting (skip in test mode)
+                        if not test_mode:
+                            time.sleep(random.uniform(0.05, 0.15))
+
+                    except Exception as e:
+                        error_result = {
+                            'success': False,
+                            'error': str(e),
+                            'data': [],
+                            'metadata': {
+                                'worker_id': worker_id,
+                                'mileage_range': f"{task.min_mileage}-{task.max_mileage}",
+                                'car_count': 0,
+                                'processing_time': 0,
+                                'proxy_used': worker_proxy and worker_proxy[:20] + '...' or 'none'
+                            }
+                        }
+                        task_id = str(task)
+                        self.report_result(task_id, error_result, worker_id)
+                        logger.error(f"Worker {worker_id} error processing task: {e}")
+
+                # Cleanup worker resources
+                if hasattr(api_client, 'session'):
+                    api_client.session.close()
+                logger.debug(f"API Worker {worker_id} finished, processed {tasks_processed} tasks")
+
+            except Exception as e:
+                logger.error(f"Worker {worker_id} thread error: {e}")
+
+        # Start all worker threads
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit worker threads
+            futures = [
+                executor.submit(worker_thread, worker_id)
+                for worker_id in range(1, self.max_workers + 1)
+            ]
+
+            # Wait for all workers to complete
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Worker thread failed: {e}")
+
+        logger.info(f"✅ Parallel coordination complete - processed {self.completed_count}/{total_tasks} tasks")
+        logger.info(f"❌ Failed workers: {len(self.failed_workers)}")
+
+        return self.results
+
+    # _setup_worker_fingerprint method removed - now handled by unified fingerprinting system
+
+
 class AutoTraderAPIClient:
-    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None, verify_ssl=False):
-        """Initialize the AutoTrader API client with configurable connection pooling.
-        
+    def __init__(self, connection_pool_size=10, optimize_connection=True, proxy=None, proxy_manager=None, verify_ssl=False, worker_id=None):
+        """Initialize the AutoTrader API client with unified fingerprinting system.
+
         Args:
             connection_pool_size: Size of the connection pool (default: 10)
             optimize_connection: Whether to use connection pooling and other optimizations (default: True)
             proxy: Optional proxy URL (e.g., "http://user:pass@host:port")
             proxy_manager: Optional ProxyManager instance for rotation
             verify_ssl: Whether to verify SSL certificates (set to False to ignore SSL errors)
+            worker_id: Optional worker ID for consistent fingerprinting
         """
         self.base_url = "https://www.autotrader.co.uk/at-gateway"
         self.proxy_manager = proxy_manager
+        self.proxy = proxy
+        self.worker_id = worker_id
         self._first_request_made = False  # Track if initial request has been made
         self._session_start_time = time.time()  # Track session start for behavior
-        
+
+        # Generate unified fingerprint for this client instance
+        self.fingerprint = FingerprintGenerator.create_http_fingerprint(
+            proxy_url=proxy,
+            worker_id=worker_id
+        )
+
         # Create session with optimized connection parameters
         self.session = requests.Session()
-        
+
         # Set SSL verification (can be disabled for testing)
         self.session.verify = verify_ssl
-        
-        # Add initial CloudFlare cookies to help bypass protection
-        self.session.cookies.set('cf_clearance', self._generate_cf_clearance(), 
-                               domain='.autotrader.co.uk', path='/')
-        self.session.cookies.set('cf_bm', self._generate_cf_bm(), 
-                               domain='.autotrader.co.uk', path='/')
-        self.session.cookies.set('cf_chl_2', self._generate_cf_chl(), 
-                               domain='.autotrader.co.uk', path='/')
-        self.session.cookies.set('cf_chl_prog', 'x19', 
-                               domain='.autotrader.co.uk', path='/')
-        
-        # Add CloudFlare browser verification cookies
-        self.session.cookies.set('_cfuvid', self._generate_cf_uvid(), 
-                               domain='.autotrader.co.uk', path='/')
-        self.session.cookies.set('_pxvid', self._generate_px_vid(),
-                               domain='.autotrader.co.uk', path='/')
-        
+
         # Configure proxy if provided directly
         if proxy:
             self.session.proxies = {
@@ -153,11 +352,11 @@ class AutoTraderAPIClient:
                     'http': proxy_url,
                     'https': proxy_url
                 }
-        
+
         if optimize_connection:
             # Configure connection pooling with optimized parameters
             self.connection_pool_size = connection_pool_size
-            
+
             # Create retry strategy with exponential backoff
             from requests.packages.urllib3.util.retry import Retry
             retry_strategy = Retry(
@@ -166,26 +365,27 @@ class AutoTraderAPIClient:
                 backoff_factor=0.5,  # Exponential backoff factor
                 allowed_methods=["GET", "POST"]  # Allow retries for GET and POST
             )
-            
+
             # Configure adapter with retry strategy and connection pooling
-            adapter = requests.adapters.HTTPAdapter(
+            adapter = CustomHTTPAdapter(
                 pool_connections=connection_pool_size,
                 pool_maxsize=connection_pool_size,
                 max_retries=retry_strategy,  # Apply retry strategy
-                pool_block=False  # Don't block when pool is exhausted
+                pool_block=False,  # Don't block when pool is exhausted
+                verify_ssl=verify_ssl  # Pass SSL verification setting
             )
-            
+
             # Apply connection pooling to both http and https
             self.session.mount('http://', adapter)
             self.session.mount('https://', adapter)
-            
+
             # Set keep-alive and connection timeouts
             self.session.keep_alive = True
             self.timeout = 30
         else:
             # Standard configuration without pooling optimizations
             self.timeout = 30
-            
+
         self.setup_headers()
         
     def _generate_cf_clearance(self):
@@ -271,123 +471,21 @@ class AutoTraderAPIClient:
         
         return '_'.join(segments)
     
-    def randomize_headers(self):
-        """Generate CloudFlare-optimized browser-like headers to avoid fingerprinting"""
-        # Browser versions - use Chrome as it has the best compatibility with CloudFlare
-        # Focus on recent stable versions that CloudFlare is least likely to block
-        chrome_versions = ["118.0.5993.88", "119.0.6045.123", "120.0.6099.129"]
-        
-        # OS platforms - Focus on common Windows and Mac platforms
-        os_platforms = [
-            "Windows NT 10.0; Win64; x64",  # Most common Windows platform
-            "Macintosh; Intel Mac OS X 10_15_7"  # Common Mac platform
-        ]
-        
-        # Select random platform - prefer Windows slightly (more common)
-        platform = random.choice(os_platforms)
-        
-        # Use Chrome only as it has best CloudFlare compatibility
-        version = random.choice(chrome_versions)
-        user_agent = f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
-        browser_version = version.split(".")[0]
-        ua_brand = f'"Google Chrome";v="{browser_version}", "Chromium";v="{browser_version}", "Not=A?Brand";v="99"'
-        
-        # CloudFlare often checks these specific header values
-        accept_langs = [
-            "en-GB,en-US;q=0.9,en;q=0.8",
-            "en-US,en;q=0.9",
-            "en-GB,en;q=0.9",
-            "en-US,en-GB;q=0.9,en;q=0.8"
-        ]
-        
-        # Device memory values typical of real browsers (in GB)
-        device_memory = random.choice(["4", "8", "16"])
-        
-        # Screen color depth (typical values)
-        color_depth = random.choice(["24", "30", "32"])
-        
-        # Viewport width (typical values)
-        viewport_width = random.choice(["1280", "1366", "1440", "1536", "1920"])
-        viewport_height = random.choice(["720", "768", "900", "864", "1080"])
-        
-        # DPR (Device Pixel Ratio) - common values
-        dpr = random.choice(["1", "1.25", "1.5", "2", "2.5"])
-        
-        # Generate headers dictionary optimized for CloudFlare
-        headers = {
-            # Essential headers CloudFlare always checks
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": random.choice(accept_langs),
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            
-            # Security headers that CloudFlare checks
-            "sec-ch-ua": ua_brand,
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": f'"{platform.split(";")[0] if ";" in platform else platform}"',
-            "sec-fetch-site": "same-origin",
-            "sec-fetch-mode": "navigate",
-            "sec-fetch-user": "?1",
-            "sec-fetch-dest": "document",
-            
-            # Client hints that real browsers send - these help bypass CloudFlare
-            "sec-ch-ua-arch": random.choice(['x86', 'arm']),
-            "sec-ch-ua-full-version": version, # Full browser version
-            "sec-ch-ua-platform-version": random.choice(['10.0.0', '11.0.0', '12.0.0', '15.6.1']),
-            "sec-ch-ua-model": "",  # Desktop browsers don't have a model
-            "sec-ch-ua-bitness": random.choice(['64', '32']),
-            "sec-ch-ua-wow64": "?0",  # Not Windows-on-Windows
-            "sec-ch-device-memory": device_memory,
-            
-            # Additional browser capability indicators
-            "device-memory": device_memory,
-            "dpr": dpr,
-            "viewport-width": viewport_width,
-            "rtt": random.choice(["50", "100", "150"]),  # Network round-trip time
-            "downlink": random.choice(["10", "5.75", "1.75"]),  # Connection speed
-            "ect": random.choice(["4g", "3g"]),  # Effective connection type
-            
-            # CloudFlare sometimes checks for these
-            "Referer": "https://www.autotrader.co.uk/",
-            "Origin": "https://www.autotrader.co.uk",
-            
-            # Cache and cookie settings
-            "Cache-Control": "max-age=0",  # CloudFlare prefers this over no-cache
-            
-            # Additional AutoTrader-specific headers
-            "x-sauron-app-name": "sauron-search-results-app",
-            "x-sauron-app-version": f"{random.randint(1000000, 9999999)}"
-        }
-        
-        # CloudFlare prefers headers in a specific order, so we won't shuffle them
-        return headers
+    # randomize_headers method removed - now handled by unified fingerprinting system
     
     def setup_headers(self):
-        """Set up the headers with randomized fingerprinting-resistant values"""
-        # Apply randomized headers
-        self.session.headers.update(self.randomize_headers())
-        
-        # Configure the custom TLS adapter for HTTPS connections
-        self.session.mount('https://', CustomHTTPAdapter(verify_ssl=self.session.verify))
+        """Set up the headers with unified fingerprinting system"""
+        # Use the CloudFlare-optimized headers from unified fingerprinting
+        cloudflare_headers = self.fingerprint.get_cloudflare_headers()
+        self.session.headers.update(cloudflare_headers)
+
+        # Configure the custom TLS adapter for HTTPS connections (already done in __init__)
     
     def _evolve_session_headers(self):
         """Subtly evolve headers during session to simulate organic browsing"""
-        # Update cache-control occasionally to simulate browser behavior
-        if random.random() < 0.3:  # 30% chance
-            cache_options = ["max-age=0", "no-cache", "no-store, no-cache, must-revalidate"]
-            self.session.headers['Cache-Control'] = random.choice(cache_options)
-        
-        # Vary some client hints slightly
-        if random.random() < 0.4:  # 40% chance  
-            device_memory = random.choice(["4", "8", "16"])
-            self.session.headers['sec-ch-device-memory'] = device_memory
-            
-        # Update viewport width occasionally
-        if random.random() < 0.2:  # 20% chance
-            viewport_width = random.choice(["1280", "1366", "1440", "1536", "1920"])
-            self.session.headers['viewport-width'] = viewport_width
+        # Regenerate headers with slight variations using unified fingerprinting
+        evolved_headers = self.fingerprint.get_cloudflare_headers()
+        self.session.headers.update(evolved_headers)
     
     def search_cars(self, make: str, model: str, postcode: str = "M15 4FN",
                    min_year: int = 2010, max_year: int = 2023,
@@ -411,8 +509,9 @@ class AutoTraderAPIClient:
         Returns:
             Dict containing search results data
         """
-        # Randomize headers for each request to avoid fingerprinting
-        self.session.headers.update(self.randomize_headers())
+        # Update headers with geo-consistent fingerprinting
+        cloudflare_headers = self.fingerprint.get_cloudflare_headers()
+        self.session.headers.update(cloudflare_headers)
         
         # Track retry attempts
         retry_count = 0
@@ -555,18 +654,10 @@ class AutoTraderAPIClient:
                     param_string = urlencode(random_params)
                     search_url = f"{search_url}&{param_string}"
                 
-                # Randomize accept and content-type headers for this specific request
+                # Use geo-consistent headers for initial search request
                 search_headers = {
-                    'Accept': random.choice([
-                        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                        'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                    ]),
-                    'Accept-Language': random.choice([
-                        'en-GB,en;q=0.9',
-                        'en-US,en;q=0.8',
-                        'en-GB,en-US;q=0.9,en;q=0.8'
-                    ])
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': self.fingerprint.accept_language
                 }
                 
                 # Generate random but plausible cookies on each retry
@@ -591,9 +682,10 @@ class AutoTraderAPIClient:
                     # Add human-like delay between retries
                     time.sleep(random.uniform(2.5, 4.5))
                     
-                    # Get a completely fresh set of headers
+                    # Get a completely fresh set of headers with unified fingerprinting
                     self.session.headers.clear()
-                    self.session.headers.update(self.randomize_headers())
+                    cloudflare_headers = self.fingerprint.get_cloudflare_headers()
+                    self.session.headers.update(cloudflare_headers)
                 
                 # Make the initial search page request with custom headers
                 initial_response = self.session.get(search_url, timeout=self.timeout, headers=search_headers)
@@ -637,19 +729,12 @@ class AutoTraderAPIClient:
                 from urllib.parse import urlencode
                 api_url = f"{self.base_url}?{urlencode(api_params)}"
                 
-                # Generate more specific headers for the API request
-                api_headers = {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json, text/plain, */*',
-                    'X-Requested-With': 'XMLHttpRequest',
+                # Get API-specific headers from unified fingerprinting
+                api_headers = self.fingerprint.get_api_headers()
+                api_headers.update({
                     'Origin': 'https://www.autotrader.co.uk',
-                    'Referer': search_url,
-                    'Sec-Fetch-Dest': 'empty',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'same-origin',
-                    # Add CloudFlare-specific header
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
+                    'Referer': search_url
+                })
                 
                 # Now make the actual API request with the custom headers
                 response = self.session.post(
@@ -918,6 +1003,116 @@ class AutoTraderAPIClient:
 
         print(f"📊 Results: {len(all_cars)} unique listings found across {len(applicable_ranges)} mileage ranges")
         return all_cars
+
+    def get_all_cars_parallel(self, make: str, model: str, postcode: str = "M15 4FN",
+                            min_year: int = 2010, max_year: int = 2023,
+                            max_mileage: int = 100000, max_pages: int = None,
+                            progress_callback: Optional[callable] = None,
+                            test_mode: bool = False, use_parallel: bool = True) -> List[Dict]:
+        """
+        Get all cars with optional parallel processing for maximum speed.
+
+        Args:
+            make: Car manufacturer
+            model: Car model
+            postcode: UK postcode for search location
+            min_year: Minimum manufacturing year
+            max_year: Maximum manufacturing year
+            max_mileage: Maximum mileage
+            max_pages: Maximum pages per range
+            progress_callback: Optional progress callback
+            test_mode: Skip delays in test mode
+            use_parallel: Whether to use parallel processing (default: True)
+
+        Returns:
+            List of car listings data
+        """
+        # Use internal parallel processing when requested
+        if use_parallel:
+            try:
+                # Import mileage ranges from config
+                try:
+                    from config.config import MILEAGE_RANGES_FOR_SPLITTING
+                except ImportError:
+                    MILEAGE_RANGES_FOR_SPLITTING = [
+                        (0, 20000),
+                        (20001, 40000),
+                        (40001, 60000),
+                        (60001, 80000),
+                        (80001, 100000)
+                    ]
+
+                # Filter ranges to only include those within our max_mileage limit
+                applicable_ranges = [
+                    (min_mile, min(max_mile, max_mileage))
+                    for min_mile, max_mile in MILEAGE_RANGES_FOR_SPLITTING
+                    if min_mile <= max_mileage
+                ]
+
+                print(f"🚀 Using parallel API scraping for {make} {model}")
+                print(f"📊 Processing {len(applicable_ranges)} mileage ranges in parallel")
+
+                # Create tasks for each mileage range
+                tasks = [
+                    APITask(
+                        make=make,
+                        model=model,
+                        postcode=postcode,
+                        min_year=min_year,
+                        max_year=max_year,
+                        min_mileage=min_mile,
+                        max_mileage=max_mile,
+                        max_pages=max_pages
+                    )
+                    for min_mile, max_mile in applicable_ranges
+                ]
+
+                # Initialize coordinator and process tasks
+                coordinator = ParallelCoordinator(max_workers=len(applicable_ranges))
+                results = coordinator.process_batch(
+                    tasks=tasks,
+                    progress_callback=progress_callback,
+                    test_mode=test_mode,
+                    max_tasks_per_worker=1  # Each worker processes exactly one mileage range
+                )
+
+                # Combine and deduplicate results from all workers
+                all_cars = []
+                seen_ids = set()
+                total_cars_found = 0
+
+                for task_id, result in results.items():
+                    if result.get('success', False):
+                        cars = result.get('data', [])
+                        total_cars_found += len(cars)
+
+                        # Deduplicate based on deal_id or url
+                        for car in cars:
+                            car_id = car.get('deal_id') or car.get('url', '')
+                            if car_id and car_id not in seen_ids:
+                                seen_ids.add(car_id)
+                                all_cars.append(car)
+
+                logger.info(f"✅ Parallel scraping complete for {make} {model}")
+                logger.info(f"📊 Results: {len(all_cars)} unique cars from {total_cars_found} total "
+                           f"(deduplication rate: {((total_cars_found - len(all_cars)) / max(total_cars_found, 1) * 100):.1f}%)")
+
+                return all_cars
+
+            except Exception as e:
+                print(f"⚠️ Parallel scraping failed, falling back to sequential: {e}")
+
+        # Fallback to sequential mileage splitting
+        print(f"🔄 Using sequential mileage splitting for {make} {model}")
+        return self.get_all_cars_with_mileage_splitting(
+            make=make,
+            model=model,
+            postcode=postcode,
+            min_year=min_year,
+            max_year=max_year,
+            max_mileage=max_mileage,
+            max_pages=max_pages
+        )
 
 def convert_api_car_to_deal(car_data: Dict) -> Dict:
     """
@@ -1213,6 +1408,249 @@ def extract_vehicle_specs(subtitle: str, title: str = '') -> dict:
             break
     
     return specs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA ADAPTER - Consolidated from data_adapter.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+class NetworkDataAdapter:
+    """
+    Converts vehicle data from API client processed format to analyzer-compatible format.
+    Consolidated from services/data_adapter.py for better architecture.
+    Updated to work with the processed format from AutoTraderAPIClient.get_all_cars()
+    """
+
+    @staticmethod
+    def _extract_fuel_type_from_title(vehicle_data: Dict) -> str:
+        """
+        Extract fuel type from vehicle title/subtitle when API field is missing.
+        This is critical fallback logic since fuel type is important for analysis.
+        Uses enhanced patterns from both original implementations.
+        """
+        # Build full title from available parts
+        title_parts = []
+        if vehicle_data.get('title'):
+            title_parts.append(vehicle_data['title'])
+        if vehicle_data.get('subtitle'):
+            title_parts.append(vehicle_data['subtitle'])
+
+        full_title = ' '.join(title_parts).lower()
+
+        if not full_title:
+            return 'Unknown'
+
+        # Unified comprehensive fuel type keyword matching (merged from both implementations)
+        fuel_keywords = {
+            # Primary fuel types
+            'petrol': 'Petrol',
+            'diesel': 'Diesel',
+            'hybrid': 'Hybrid',
+            'electric': 'Electric',
+            'plugin': 'Plug-in Hybrid',
+            'plug-in': 'Plug-in Hybrid',
+
+            # Diesel-specific patterns (enhanced from both files)
+            'tdi': 'Diesel',
+            'hdi': 'Diesel',
+            'cdti': 'Diesel',
+            'dci': 'Diesel',
+            'dti': 'Diesel',
+            'crdi': 'Diesel',
+            'multijet': 'Diesel',
+            'bluetec': 'Diesel',
+            'bluemotion': 'Diesel',
+            'biturbo diesel': 'Diesel',
+
+            # Petrol-specific patterns (enhanced from both files)
+            'tsi': 'Petrol',
+            'tfsi': 'Petrol',
+            'fsi': 'Petrol',
+            'gti': 'Petrol',
+            'vvt': 'Petrol',
+            'vtech': 'Petrol',
+            'vtec': 'Petrol',
+            '16v': 'Petrol',
+            'turbo': 'Petrol',
+            'turbo petrol': 'Petrol',
+
+            # Hybrid patterns (enhanced from both files)
+            'hybrid': 'Hybrid',
+            'plugin hybrid': 'Hybrid',
+            'plug-in hybrid': 'Hybrid',
+            'self-charging hybrid': 'Hybrid',
+            'h-': 'Hybrid',
+            'e-cvt': 'Hybrid',
+            'synergy': 'Hybrid',
+
+            # Electric patterns (enhanced from both files)
+            'electric': 'Electric',
+            'ev': 'Electric',
+            'bev': 'Electric',
+            'e-': 'Electric',
+            'pure electric': 'Electric',
+            'zero emission': 'Electric',
+        }
+
+        # Check for fuel type indicators
+        for keyword, fuel_type in fuel_keywords.items():
+            if keyword in full_title:
+                return fuel_type
+
+        # Model-specific fallback patterns (from both files)
+        if any(pattern in full_title for pattern in ['116d', '118d', '120d', '318d', '320d', '520d']):
+            return 'Diesel'
+
+        # Additional petrol fallback patterns
+        if any(x in full_title for x in ['16v', 'tsi', 'fsi', 'vvt']):
+            return 'Petrol'
+
+        # Default to Unknown if no matches found
+        return 'Unknown'
+
+    @staticmethod
+    def _safe_string_field(value: any, default: str = '') -> str:
+        """
+        Safely convert a field to string, handling None values.
+        """
+        if value is None:
+            return default
+        return str(value).strip() if str(value).strip() else default
+
+    @staticmethod
+    def convert_vehicle(processed_vehicle: Dict) -> Dict:
+        """
+        Convert a single vehicle from API client processed format to analyzer format.
+
+        Args:
+            processed_vehicle: Vehicle data already processed by AutoTraderAPIClient
+
+        Returns:
+            Dict: Vehicle data in analyzer-compatible format
+
+        Raises:
+            ValueError: If vehicle data is invalid/empty
+        """
+        # Handle None input
+        if processed_vehicle is None:
+            raise ValueError("None vehicle object")
+
+        # Skip completely empty objects
+        if not processed_vehicle or processed_vehicle == {}:
+            raise ValueError("Empty vehicle object")
+
+        # Check for required deal_id (this is what your API client provides)
+        deal_id = processed_vehicle.get('deal_id')
+        if not deal_id:
+            available_keys = list(processed_vehicle.keys()) if isinstance(processed_vehicle, dict) else []
+            raise ValueError(f"Vehicle missing deal_id. Available keys: {available_keys}")
+
+        # Validate essential data
+        year = processed_vehicle.get('year', 0)
+        mileage = processed_vehicle.get('mileage', 0)
+        price = processed_vehicle.get('price', 0)
+
+        if year == 0 or mileage == 0 or price == 0:
+            raise ValueError(f"Invalid vehicle data: price={price}, year={year}, mileage={mileage}")
+
+        try:
+            # Handle price properly
+            if isinstance(price, int):
+                price_numeric = price
+                price_display = str(price)
+            else:
+                # Try to extract numeric value if it's a string
+                price_str = str(price)
+                price_numeric = int(re.sub(r'[^\d]', '', price_str)) if price_str else 0
+                price_display = price_str
+
+            # Apply fallback logic for critical fields
+            # CRITICAL: Handle fuel_type with fallback logic
+            fuel_type = processed_vehicle.get('fuel_type')
+            if not fuel_type:  # None or empty string
+                fuel_type = NetworkDataAdapter._extract_fuel_type_from_title(processed_vehicle)
+
+            # Handle other fields that might be None
+            transmission = NetworkDataAdapter._safe_string_field(processed_vehicle.get('transmission'), 'Unknown')
+            body_type = NetworkDataAdapter._safe_string_field(processed_vehicle.get('body_type'), '')  # Empty string for analyzer to skip
+
+            # Map the processed data to analyzer-compatible format
+            analyzer_vehicle = {
+                # Core identification - CRITICAL: Include deal_id
+                'deal_id': deal_id,
+                'url': processed_vehicle.get('url', ''),
+
+                # Pricing
+                'price': price_display,
+                'price_numeric': price_numeric,
+
+                # Key specs
+                'year': year,
+                'mileage': mileage,
+                'make': processed_vehicle.get('make', ''),
+                'model': processed_vehicle.get('model', ''),
+
+                # Seller info - needed for filtering private sellers
+                'seller_type': 'dealer' if processed_vehicle.get('seller_type') == 'TRADE' else 'private',
+                'location': processed_vehicle.get('location', ''),
+
+                # Technical specifications - essential for analysis
+                'engine_size': processed_vehicle.get('engine_size'),
+                'fuel_type': fuel_type,  # Now guaranteed to have a value (never None)
+                'transmission': transmission,  # Now guaranteed to be string (never None)
+                'body_type': body_type,  # Now guaranteed to be string (empty if unknown)
+                'doors': processed_vehicle.get('doors'),
+
+                # Required metadata fields only
+                'number_of_images': processed_vehicle.get('image_count', 0),
+                'image_url': processed_vehicle.get('image_url', ''),
+                'image_url_2': processed_vehicle.get('image_url_2', ''),
+                'badges': processed_vehicle.get('badges', []),
+            }
+
+            return analyzer_vehicle
+
+        except Exception as e:
+            raise ValueError(f"Error converting vehicle {deal_id}: {str(e)}")
+
+    @staticmethod
+    def convert_vehicle_list(vehicle_list: List[Dict]) -> List[Dict]:
+        """
+        Convert a list of vehicles from API client processed format to analyzer format.
+
+        Args:
+            vehicle_list: List of vehicles already processed by AutoTraderAPIClient
+
+        Returns:
+            List of converted vehicles in analyzer format
+        """
+        converted_vehicles = []
+        fuel_fallbacks_applied = 0
+
+        for vehicle_data in vehicle_list:
+            # Skip empty objects
+            if not vehicle_data:
+                continue
+
+            try:
+                # Track fuel fallbacks
+                original_fuel = vehicle_data.get('fuel_type')
+
+                converted = NetworkDataAdapter.convert_vehicle(vehicle_data)
+
+                # Count fuel fallbacks
+                if not original_fuel and converted.get('fuel_type') != 'Unknown':
+                    fuel_fallbacks_applied += 1
+
+                converted_vehicles.append(converted)
+
+            except Exception:
+                pass
+
+        # Silent operation - messages moved to scrape_grouping.py
+
+        return converted_vehicles
+
 
 # Test function
 def test_api_scraping():

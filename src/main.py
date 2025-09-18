@@ -50,7 +50,7 @@ requests.Session = PatchedSession
 
 try:
     # Import from project root context
-    from src.scraper import main
+    from src.scraping import main
     
     if __name__ == "__main__":
         main()

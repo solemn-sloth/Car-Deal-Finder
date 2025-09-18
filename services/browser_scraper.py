@@ -1168,7 +1168,7 @@ def batch_scrape_price_markers_optimized(urls, headless=True, progress_callback=
     
     # Initialize proxy manager for worker-specific IPs
     try:
-        from services.proxy_rotation import ProxyManager
+        from services.stealth_orchestrator import ProxyManager
         proxy_manager = ProxyManager()
     except:
         proxy_manager = None

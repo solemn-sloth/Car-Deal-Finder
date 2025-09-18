@@ -31,18 +31,18 @@ from playwright.sync_api import sync_playwright
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import proxy rotation service
-from services.proxy_rotation import ProxyManager
+from services.stealth_orchestrator import ProxyManager
 
 # Import the retail price scraper for price marker data
-from services.retail_price_scraper import scrape_price_marker, batch_scrape_price_markers
+from services.browser_scraper import scrape_price_marker, batch_scrape_price_markers
 
 # Import main scraping components from your core codebase
 from services.network_requests import AutoTraderAPIClient
-from services.data_adapter import NetworkDataAdapter
+from services.network_requests import NetworkDataAdapter
 
 # Import universal ML model components
-from services.universal_ml_model import (
-    load_universal_model, predict_with_universal_model, 
+from services.ML_model import (
+    load_universal_model, predict_with_universal_model,
     is_universal_model_available, get_universal_model_info
 )
 from config.config import is_retail_scraping_due
@@ -225,11 +225,18 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
     api_client = AutoTraderAPIClient(verify_ssl=verify_ssl, proxy=proxy, proxy_manager=proxy_manager)
     
     try:
-        # Use mileage splitting to bypass AutoTrader's 2000 listing limit
-        cars = api_client.get_all_cars_with_mileage_splitting(
+        # Use parallel API scraping for maximum speed, fallback to sequential mileage splitting
+        try:
+            from config.config import PARALLEL_API_SCRAPING
+            use_parallel = PARALLEL_API_SCRAPING.get('enabled', True)
+        except ImportError:
+            use_parallel = True  # Default to parallel if config unavailable
+
+        cars = api_client.get_all_cars_parallel(
             make=make,
             model=model,
-            max_pages=max_pages  # Passing None to get all pages
+            max_pages=max_pages,  # Passing None to get all pages
+            use_parallel=use_parallel
         )
         
         # Convert the listings to a consistent format
@@ -1248,7 +1255,7 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
     # Check if weekly retail scraping is due
     if is_retail_scraping_due():
         logger.info("🔄 Weekly retail scraping is due - running full training process...")
-        from services.weekly_trainer import run_weekly_training  # Import locally to avoid circular import
+        from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
         training_success = run_weekly_training(
             max_pages_per_model=max_pages,
             verify_ssl=verify_ssl,
@@ -1264,7 +1271,7 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
     # Load universal model for daily operations
     if not is_universal_model_available():
         logger.warning("⚠️ No universal model available - running weekly training first...")
-        from services.weekly_trainer import run_weekly_training  # Import locally to avoid circular import
+        from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
         training_success = run_weekly_training(
             max_pages_per_model=max_pages,
             verify_ssl=verify_ssl,
@@ -1534,7 +1541,7 @@ def main():
     # Handle weekly training override
     if args.weekly_training:
         print("🔄 Forcing weekly retail scraping and model training...")
-        from services.weekly_trainer import run_weekly_training  # Import locally to avoid circular import
+        from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
         success = run_weekly_training(
             max_pages_per_model=None,  # Always use maximum pages
             verify_ssl=verify_ssl,
