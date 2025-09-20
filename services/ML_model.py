@@ -164,24 +164,20 @@ class UniversalMLModel:
                         except (ValueError, TypeError):
                             pass
         
-        # Create spec_numeric (existing trim level logic)
-        trim_levels = {
-            'r-line': 2.5, 'gtd': 2.2, 'gti': 2.5, 'r': 3.0, 'gte': 2.3,
-            'sport': 1.8, 'se': 1.3, 's': 1.0, 'luxury': 2.0, 'amg': 3.0,
-            'm sport': 2.3, '4wd': 1.5, 'quattro': 1.5, 'dsg': 1.2
-        }
-        
-        df['spec_numeric'] = 1.0
-        
+        # Create unique spec encoding - each spec gets its own ID
         if 'spec' in df.columns:
-            for idx, row in df.iterrows():
-                if pd.notna(row.get('spec')):
-                    spec_text = row['spec'].lower()
-                    for trim, value in trim_levels.items():
-                        if trim in spec_text:
-                            df.at[idx, 'spec_numeric'] *= value
-                    # Cap at reasonable range
-                    df.at[idx, 'spec_numeric'] = min(5.0, df.at[idx, 'spec_numeric'])
+            # Normalize spec strings (lowercase, strip whitespace)
+            df['spec_normalized'] = df['spec'].fillna('').astype(str).str.lower().str.strip()
+
+            # Assign unique numeric IDs to each spec using factorize
+            # factorize returns (codes, uniques) where codes are 0-based, so add 1 to start from 1
+            spec_codes, spec_uniques = pd.factorize(df['spec_normalized'])
+            df['spec_numeric'] = spec_codes + 1
+
+            logger.debug(f"Universal model: Found {len(spec_uniques)} unique specs in dataset")
+        else:
+            # No spec column available, use default
+            df['spec_numeric'] = 1
     
     def _process_fuel_transmission_features(self, df: pd.DataFrame):
         """Process fuel type and transmission features (existing logic)."""

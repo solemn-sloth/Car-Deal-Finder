@@ -333,7 +333,9 @@ class SupabaseStorage:
             
         except Exception as e:
             error_msg = f"Error during duplicate cleanup: {e}"
-            print(f"   ❌ {error_msg}")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.error(error_msg)
             return {
                 "success": False,
                 "error": error_msg,
@@ -431,7 +433,6 @@ class SupabaseStorage:
                 
                 # New normalized URL - prepare for insertion
                 deal['updated_at'] = current_time.isoformat()
-                deal['date_added'] = current_time.strftime('%Y-%m-%d')
                 deal['created_at'] = current_time.isoformat()
                 
                 if 'deal_id' not in deal:
@@ -591,7 +592,9 @@ class SupabaseStorage:
                 .execute()
             
             deleted_count = len(delete_response.data) if delete_response.data else 0
-            print(f"🧹 Cleaned up {deleted_count} deals older than {days_old} days")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.info(f"Cleaned up {deleted_count} deals older than {days_old} days")
             
             return {
                 "success": True,
@@ -937,10 +940,7 @@ class SupabaseStorage:
             total_deals_after = len(existing_urls) + added_count - removed_count
             
             # Deal synchronization complete
-            # Add some debug info to help understand what's happening
-            print(f"   🔄 Sync debug: {len(new_deal_urls)} new URLs, {len(current_deal_ids)} deal IDs in scrape")
-            print(f"   🔄 Sync debug: {len(existing_urls)} existing URLs, {len(existing_deal_ids)} deal IDs in DB")
-            print(f"   🔄 Sync debug: {len(urls_to_add)} URLs to add, {len(urls_to_update)} to update, {len(urls_to_remove)} to remove")
+            # Debug info removed to prevent output chaos
             
             return {
                 "success": True,
@@ -955,7 +955,9 @@ class SupabaseStorage:
             
         except Exception as e:
             error_msg = f"Error during intelligent sync: {e}"
-            print(f"❌ {error_msg}")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.error(error_msg)
             return {
                 "success": False,
                 "error": error_msg

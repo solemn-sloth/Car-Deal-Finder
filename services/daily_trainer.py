@@ -57,7 +57,7 @@ class DailyModelTrainingOrchestrator:
         # Initialize config
         self.config = self._load_or_create_config()
 
-        logger.info(f"Initialized daily trainer: 139 models in hardcoded groups, {self.models_per_day} per day")
+        logger.debug(f"Initialized daily trainer: 139 models in hardcoded groups, {self.models_per_day} per day")
 
     def _load_or_create_config(self) -> Dict:
         """Load existing config or create new one."""
@@ -112,7 +112,7 @@ class DailyModelTrainingOrchestrator:
         self.config['last_run_date'] = datetime.now().isoformat()
         self._save_config(self.config)
 
-        logger.info(f"Advanced cycle: Day {current_day} → Day {next_day}")
+        logger.debug(f"Advanced cycle: Day {current_day} → Day {next_day}")
 
     def get_model_path(self, make: str, model: str) -> Tuple[Path, Path]:
         """Get file paths for model and scaler."""
@@ -125,7 +125,7 @@ class DailyModelTrainingOrchestrator:
 
         return model_file, scaler_file
 
-    def train_single_model(self, make: str, model: str) -> bool:
+    def train_single_model(self, make: str, model: str, force_retrain: bool = False) -> bool:
         """
         Train a single car model with fresh data.
 
@@ -137,28 +137,45 @@ class DailyModelTrainingOrchestrator:
             bool: True if training succeeded, False otherwise
         """
         try:
-            logger.info(f"Training model: {make} {model}")
+            logger.debug(f"Training model: {make} {model}")
 
-            # Step 1: Scrape fresh dealer data
-            dealer_listings = scrape_listings(
+            # Step 0: Check if model already exists and is recent (skip training if not needed)
+            if not force_retrain:
+                model_file, scaler_file = self.get_model_path(make, model)
+                if model_file.exists() and scaler_file.exists():
+                    # Check if model was created recently (within last 7 days)
+                    import time
+                    model_age_days = (time.time() - model_file.stat().st_mtime) / (24 * 3600)
+                    if model_age_days < 7:
+                        logger.info(f"✅ Model for {make} {model} is recent ({model_age_days:.1f} days old) - skipping training")
+                        return True  # Consider this a successful "training" since model is up-to-date
+
+            # Step 1: Scrape fresh data
+            all_listings = scrape_listings(
                 make=make,
                 model=model,
-                seller_type="dealer",
                 max_pages=self.max_pages_per_model,
                 verify_ssl=self.verify_ssl
             )
+
+            if not all_listings:
+                logger.warning(f"No listings found for {make} {model}")
+                return False
+
+            # Step 2: Filter for dealer listings only
+            dealer_listings = filter_listings_by_seller_type(all_listings, "Dealer")
 
             if not dealer_listings:
                 logger.warning(f"No dealer listings found for {make} {model}")
                 return False
 
-            logger.info(f"Scraped {len(dealer_listings)} dealer listings for {make} {model}")
+            logger.debug(f"Scraped {len(dealer_listings)} dealer listings for {make} {model}")
 
             # Step 2: Enrich with price markers
             enriched_listings = enrich_with_price_markers(dealer_listings, make, model)
 
             # Filter to only dealer listings with valid price markers
-            enriched_dealers = filter_listings_by_seller_type(enriched_listings, "dealer")
+            enriched_dealers = filter_listings_by_seller_type(enriched_listings, "Dealer")
             enriched_dealers = [l for l in enriched_dealers if l.get('price_vs_market', 0) != 0]
 
             if len(enriched_dealers) < self.min_samples_per_model:
@@ -194,10 +211,9 @@ class DailyModelTrainingOrchestrator:
             Dict with training results summary
         """
         if not self.config['enabled']:
-            logger.info("Daily training is disabled")
             return {'enabled': False}
 
-        logger.info("🚀 Starting daily model training")
+        logger.debug("🚀 Starting daily model training")
 
         # Get models to train based on parameters
         if target_model:
@@ -215,7 +231,7 @@ class DailyModelTrainingOrchestrator:
             if force_retrain:
                 logger.info(f"🔄 Force retraining model: {target_model} (across {len(todays_models)} makes)")
             else:
-                logger.info(f"🎯 Training model: {target_model} (across {len(todays_models)} makes)")
+                logger.debug(f"🎯 Training model: {target_model} (across {len(todays_models)} makes)")
         else:
             # Get today's scheduled models
             todays_models = self.get_todays_models()
@@ -240,7 +256,7 @@ class DailyModelTrainingOrchestrator:
             model = model_info['model']
 
             try:
-                success = self.train_single_model(make, model)
+                success = self.train_single_model(make, model, force_retrain)
 
                 if success:
                     results['models_trained'] += 1
@@ -257,7 +273,7 @@ class DailyModelTrainingOrchestrator:
         # Advance to next day
         self.advance_cycle()
 
-        logger.info(f"✅ Daily training complete: {results['models_trained']} trained, {results['models_failed']} failed")
+        logger.debug(f"✅ Daily training complete: {results['models_trained']} trained, {results['models_failed']} failed")
 
         return results
 
@@ -293,9 +309,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Configure logging
+    # Configure logging - suppress verbose INFO logs, only show errors
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.ERROR,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 

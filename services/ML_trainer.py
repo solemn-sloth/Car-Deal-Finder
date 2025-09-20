@@ -384,8 +384,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-proxy", action="store_true", help="Disable proxy rotation")
     
     args = parser.parse_args()
-    
-    print("🚀 Starting Weekly Training Orchestrator...")
+
+    from src.output_manager import get_output_manager
+    output_manager = get_output_manager()
+    output_manager.info("Starting Weekly Training Orchestrator...")
     
     success = run_weekly_training(
         max_pages_per_model=args.max_pages,
@@ -394,7 +396,7 @@ if __name__ == "__main__":
     )
     
     if success:
-        print("✅ Weekly training completed successfully")
+        output_manager.success("Weekly training completed successfully")
     else:
-        print("❌ Weekly training failed or completed with errors")
+        output_manager.error("Weekly training failed or completed with errors")
         sys.exit(1)

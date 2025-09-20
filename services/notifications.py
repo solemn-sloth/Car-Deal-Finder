@@ -459,16 +459,20 @@ class DealNotificationPipeline:
         Returns summary of notification results
         """
         if not new_deals:
-            print("📭 No new deals to notify about")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.info("No new deals to notify about")
             return {'success': True, 'sent': 0, 'skipped': 0, 'errors': 0}
         
-        print(f"📧 Processing notifications for {len(new_deals)} new deals...")
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.info(f"Processing notifications for {len(new_deals)} new deals...")
         
         # Get users eligible for notifications
         eligible_users = self.get_notification_eligible_users()
         
         if not eligible_users:
-            print("📭 No users eligible for notifications")
+            output_manager.info("No users eligible for notifications")
             return {'success': True, 'sent': 0, 'skipped': 0, 'errors': 0}
         
         results = {
@@ -545,7 +549,7 @@ class DealNotificationPipeline:
                     'error': str(e)
                 })
         
-        print(f"📧 Notification summary: {results['sent']} sent, {results['skipped']} skipped, {results['errors']} errors")
+        output_manager.info(f"Notification summary: {results['sent']} sent, {results['skipped']} skipped, {results['errors']} errors")
         results['success'] = results['errors'] == 0
         return results
     

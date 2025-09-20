@@ -12,6 +12,7 @@ import numpy as np
 import xgboost as xgb
 import pickle
 import logging
+import warnings
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from sklearn.model_selection import train_test_split
@@ -19,10 +20,15 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from pathlib import Path
 
+# Suppress XGBoost warnings about file format
+warnings.filterwarnings("ignore", message=".*UBJSON format.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
+
 # Add project root to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.config import get_xgboost_params
+from src.output_manager import get_output_manager
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +46,10 @@ def prepare_model_specific_features(listings: List[Dict[str, Any]]) -> pd.DataFr
     # Convert to DataFrame
     df = pd.DataFrame(listings)
 
+
     if df.empty:
         return df
+
 
     # Ensure required columns exist
     required_columns = ['asking_price', 'mileage', 'year']
@@ -54,18 +62,49 @@ def prepare_model_specific_features(listings: List[Dict[str, Any]]) -> pd.DataFr
     if 'price_numeric' in df.columns and 'asking_price' not in df.columns:
         df['asking_price'] = df['price_numeric']
 
-    # Compute car age from year
-    current_year = datetime.now().year
-    df['age'] = current_year - df['year']
+    # Ensure asking_price and mileage are numeric
+    df['asking_price'] = pd.to_numeric(df['asking_price'], errors='coerce')
+    df['mileage'] = pd.to_numeric(df['mileage'], errors='coerce')
 
-    # Calculate market value from price markers
-    if 'price_vs_market' in df.columns:
-        # If price is above market, market value is lower than asking price
-        # If price is below market, market value is higher than asking price
-        df['market_value'] = df['asking_price'] + df['price_vs_market']
+    # Fill missing values with reasonable defaults
+    df['asking_price'] = df['asking_price'].fillna(0)
+    df['mileage'] = df['mileage'].fillna(50000)
+
+    # Compute car age from year (ensure year is numeric)
+    current_year = datetime.now().year
+
+    # Convert year to numeric, handling any string values
+    try:
+        df['year'] = pd.to_numeric(df['year'], errors='coerce')
+
+        # Fill any invalid years with a reasonable default (e.g., 2015)
+        df['year'] = df['year'].fillna(2015)
+
+        df['age'] = current_year - df['year']
+    except Exception as e:
+        logger.error(f"Error processing year column: {e}")
+        # Set default age if calculation fails
+        df['age'] = 9  # Default age for cars
+
+    # Check if this is training data (has market_value) or prediction data (no market_value)
+    is_training_data = 'market_value' in df.columns
+
+    if is_training_data:
+        # Filter out rows without real market values for training
+        valid_market_mask = (df['market_value'].notna()) & (df['market_value'] > 0)
+
+        if valid_market_mask.any():
+            # Keep only listings with actual market values
+            df = df[valid_market_mask].copy()
+            logger.info(f"Using {len(df)} listings with actual market_value from retail price scraping")
+
+        else:
+            # No valid market values found in training data
+            logger.error("No valid market_value data found - cannot train without real market prices")
+            return pd.DataFrame()  # Return empty DataFrame
     else:
-        logger.warning("'price_vs_market' not in data, setting market_value to asking_price")
-        df['market_value'] = df['asking_price']
+        # For prediction data, we don't need market_value
+        logger.info(f"Processing {len(df)} listings for prediction (no market_value needed)")
 
     # Extract engine size from spec/subtitle
     df['engine_size'] = np.nan
@@ -95,55 +134,89 @@ def prepare_model_specific_features(listings: List[Dict[str, Any]]) -> pd.DataFr
 
     logger.info(f"Extracted engine sizes: min={df['engine_size'].min():.1f}, max={df['engine_size'].max():.1f}, mean={df['engine_size'].mean():.2f}")
 
-    # Extract and encode fuel type (simplified)
-    df['fuel_type_numeric'] = 1  # Default to petrol
+    # Extract and encode fuel type with unique IDs
     if 'spec' in df.columns:
-        # Simple fuel type detection
-        fuel_map = {'diesel': 2, 'hybrid': 3, 'electric': 4, 'plugin': 3}
+        # Extract fuel type from spec text first
+        df['fuel_type_extracted'] = 'petrol'  # Default
+
+        # Fuel type detection patterns (expanded for better detection)
+        fuel_patterns = {'diesel': ['diesel', 'tdi', 'hdi', 'dci', 'd4d', 'bluetec',
+                                   # BMW diesel codes
+                                   '318d', '320d', '325d', '330d', '335d', '340d',
+                                   # Audi diesel codes
+                                   'a3 tdi', 'a4 tdi', 'a6 tdi',
+                                   # Mercedes diesel codes
+                                   'cdi', 'bluetec'],
+                        'plugin': ['plugin', 'phev', 'plug-in',
+                                  # BMW plugin hybrid codes
+                                  '225xe', '330e', '530e', '740e', 'x5 xdrive40e'],
+                        'hybrid': ['hybrid', 'hev'],
+                        'electric': ['electric', 'ev', 'bev',
+                                    # Specific electric models
+                                    'i3', 'leaf', 'model 3', 'e-tron']}
+
         for idx, spec in df['spec'].items():
             if pd.notna(spec):
                 spec_lower = str(spec).lower()
-                for fuel_type, code in fuel_map.items():
-                    if fuel_type in spec_lower:
-                        df.at[idx, 'fuel_type_numeric'] = code
+                for fuel_type, patterns in fuel_patterns.items():
+                    if any(pattern in spec_lower for pattern in patterns):
+                        df.at[idx, 'fuel_type_extracted'] = fuel_type
                         break
 
-    # Extract and encode transmission (simplified)
-    df['transmission_numeric'] = 1  # Default to manual
+        # Now create unique numeric IDs for each fuel type found in the dataset
+        fuel_codes, fuel_uniques = pd.factorize(df['fuel_type_extracted'])
+        df['fuel_type_numeric'] = fuel_codes + 1
+
+        logger.info(f"Found {len(fuel_uniques)} unique fuel types: {list(fuel_uniques)}")
+    else:
+        # No spec column available, use default
+        df['fuel_type_numeric'] = 1
+
+    # Extract and encode transmission with unique IDs
     if 'spec' in df.columns:
-        # Simple transmission detection
-        trans_map = {'automatic': 2, 'auto': 2, 'cvt': 3, 'dsg': 4}
+        # Extract transmission type from spec text first
+        df['transmission_extracted'] = 'manual'  # Default
+
+        # Transmission detection patterns (keeping existing logic but expanded)
+        trans_patterns = {'automatic': ['automatic', 'auto'],
+                         'cvt': ['cvt'],
+                         'dsg': ['dsg'],
+                         'semi-auto': ['semi-auto', 'semi auto']}
+
         for idx, spec in df['spec'].items():
             if pd.notna(spec):
                 spec_lower = str(spec).lower()
-                for trans_type, code in trans_map.items():
-                    if trans_type in spec_lower:
-                        df.at[idx, 'transmission_numeric'] = code
+                for trans_type, patterns in trans_patterns.items():
+                    if any(pattern in spec_lower for pattern in patterns):
+                        df.at[idx, 'transmission_extracted'] = trans_type
                         break
 
-    # Create categorical spec encoding (simplified version of previous logic)
-    df['spec_numeric'] = 1  # Default to base
+        # Now create unique numeric IDs for each transmission type found in the dataset
+        trans_codes, trans_uniques = pd.factorize(df['transmission_extracted'])
+        df['transmission_numeric'] = trans_codes + 1
+
+        logger.info(f"Found {len(trans_uniques)} unique transmission types: {list(trans_uniques)}")
+    else:
+        # No spec column available, use default
+        df['transmission_numeric'] = 1
+
+    # Create unique spec encoding - each spec gets its own ID
     if 'spec' in df.columns:
-        spec_categories = {
-            'luxury': ['luxury', 'premium', 'executive', 'lounge', 'se l'],
-            'sport': ['sport', 'r-line', 'gti', 'gtd', 'r', 'gte', 'm sport', 'amg'],
-            'awd': ['4wd', 'awd', '4x4', 'quattro', '4motion'],
-            'tech': ['panoramic', 'leather', 'navigation', 'tech pack', 'dsg']
-        }
+        # Normalize spec strings (lowercase, strip whitespace)
+        df['spec_normalized'] = df['spec'].fillna('').astype(str).str.lower().str.strip()
 
-        for idx, spec in df['spec'].items():
-            if pd.notna(spec):
-                spec_lower = str(spec).lower()
+        # Assign unique numeric IDs to each spec using factorize
+        # factorize returns (codes, uniques) where codes are 0-based, so add 1 to start from 1
+        spec_codes, spec_uniques = pd.factorize(df['spec_normalized'])
+        df['spec_numeric'] = spec_codes + 1
 
-                # Check categories in order of priority
-                if any(trim in spec_lower for trim in spec_categories['luxury']):
-                    df.at[idx, 'spec_numeric'] = 3  # Luxury
-                elif any(trim in spec_lower for trim in spec_categories['sport']):
-                    df.at[idx, 'spec_numeric'] = 2  # Sport
-                elif any(trim in spec_lower for trim in spec_categories['awd']):
-                    df.at[idx, 'spec_numeric'] = 4  # AWD
-                elif any(trim in spec_lower for trim in spec_categories['tech']):
-                    df.at[idx, 'spec_numeric'] = 5  # Tech
+        logger.info(f"Found {len(spec_uniques)} unique specs in dataset")
+        if len(spec_uniques) <= 10:  # Log spec mappings for small datasets
+            for i, spec in enumerate(spec_uniques):
+                logger.info(f"  Spec ID {i+1}: '{spec}'")
+    else:
+        # No spec column available, use default
+        df['spec_numeric'] = 1
 
     logger.info(f"spec_numeric stats: min={df['spec_numeric'].min():.2f}, max={df['spec_numeric'].max():.2f}, mean={df['spec_numeric'].mean():.2f}")
 
@@ -152,7 +225,6 @@ def prepare_model_specific_features(listings: List[Dict[str, Any]]) -> pd.DataFr
         'asking_price',
         'mileage',
         'age',
-        'market_value',
         'fuel_type_numeric',
         'transmission_numeric',
         'engine_size',
@@ -162,9 +234,21 @@ def prepare_model_specific_features(listings: List[Dict[str, Any]]) -> pd.DataFr
     # Ensure all feature columns exist
     existing_features = [col for col in feature_columns if col in df.columns]
 
+
     # Drop rows with missing values in core features
-    core_features = ['asking_price', 'mileage', 'age', 'market_value']
-    df_features = df[existing_features].dropna(subset=[col for col in core_features if col in df.columns])
+    if is_training_data:
+        # For training: require market_value for target variable
+        core_features = ['asking_price', 'mileage', 'age', 'market_value']
+        # CRITICAL: Need to include market_value in the returned DataFrame for training!
+        features_with_target = existing_features + ['market_value']
+
+        df_features = df[features_with_target].dropna(subset=[col for col in core_features if col in df.columns])
+    else:
+        # For prediction: don't require market_value (we're trying to predict it)
+        core_features = ['asking_price', 'mileage', 'age']
+
+        df_features = df[existing_features].dropna(subset=[col for col in core_features if col in df.columns])
+
 
     logger.info(f"Prepared {len(df_features)} listings with complete feature data")
     logger.info(f"Features used: {existing_features}")
@@ -185,23 +269,49 @@ def train_model_specific(make: str, model: str, dealer_listings: List[Dict[str, 
         bool: True if training succeeded, False otherwise
     """
     try:
-        logger.info(f"Training model-specific XGBoost for {make} {model}")
+        logger.debug(f"Training model-specific XGBoost for {make} {model}")
+
 
         # Prepare features
         df = prepare_model_specific_features(dealer_listings)
 
         if df.empty:
-            logger.error(f"No valid features prepared for {make} {model}")
-            return False
+            # Check if the issue is specifically missing market_value data
+            # Create test data without market_value column to see if data exists
+            test_listings = []
+            for listing in dealer_listings:
+                test_listing = listing.copy()
+                if 'market_value' in test_listing:
+                    del test_listing['market_value']
+                test_listings.append(test_listing)
+
+            test_df = prepare_model_specific_features(test_listings)
+            if not test_df.empty:
+                # Data exists but no market_value - this triggers retail scraping
+                error_msg = f"No valid market_value data found - cannot train without real market prices for {make} {model}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            else:
+                # No data at all
+                error_msg = f"No valid features prepared for {make} {model}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
 
         if len(df) < 10:
             logger.error(f"Insufficient data for {make} {model}: {len(df)} samples (need at least 10)")
             return False
 
-        # Prepare training data
-        feature_columns = [col for col in df.columns if col != 'market_value']
-        X = df[feature_columns].values
-        y = df['market_value'].values
+
+        # Prepare training data with detailed error handling
+        try:
+            # Extract features and target
+            feature_columns = [col for col in df.columns if col != 'market_value']
+            X = df[feature_columns].values
+            y = df['market_value'].values
+
+        except Exception as e:
+            logger.error(f"Error in feature extraction: {e}")
+            raise
 
         logger.info(f"Training with {len(X)} samples and {len(feature_columns)} features")
 
@@ -340,7 +450,7 @@ def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], O
 
 if __name__ == "__main__":
     # Test with some sample data
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.ERROR)
 
     sample_listings = [
         {

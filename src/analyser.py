@@ -37,28 +37,24 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import proxy rotation service
 from services.stealth_orchestrator import ProxyManager
 
-# Import the retail price scraper for price marker data
-from services.browser_scraper import scrape_price_marker, batch_scrape_price_markers
+# Import the price scraper for price marker data
+from services.price_scraper import scrape_price_marker, batch_scrape_price_markers
 
 # Import main scraping components from your core codebase
 from services.network_requests import AutoTraderAPIClient
 from services.network_requests import NetworkDataAdapter
 
-# Import universal ML model components
-from services.ML_model import (
-    load_universal_model, predict_with_universal_model,
-    is_universal_model_available, get_universal_model_info
-)
+# Individual ML model components (no universal model needed)
 from config.config import is_retail_scraping_due
 
 # Project paths - everything goes to archive folder
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHIVE_PATH = os.path.join(PROJECT_ROOT, 'archive')
 
-# Set up logging
+# Set up logging - suppress verbose logs, only show errors
 os.makedirs(ARCHIVE_PATH, exist_ok=True)
 logging.basicConfig(
-    level=logging.WARNING,  # Only show warnings and errors
+    level=logging.ERROR,  # Only show errors
     format='%(message)s',  # Clean format without timestamps
     handlers=[
         logging.StreamHandler()
@@ -70,12 +66,10 @@ logger = logging.getLogger("ml_analyser")
 MIN_PROFIT_MARGIN = 0.15  # 15% minimum profit margin
 DATABASE_PATH = os.path.join(ARCHIVE_PATH, "car_deals_database.pkl")
 MODELS_PATH = os.path.join(ARCHIVE_PATH, "ml_models")
-CACHE_DIR = os.path.join(ARCHIVE_PATH, "cache")
 DATA_OUTPUTS_PATH = os.path.join(ARCHIVE_PATH, "outputs")
 
 # Create directories if they don't exist
 os.makedirs(MODELS_PATH, exist_ok=True)
-os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(DATA_OUTPUTS_PATH, exist_ok=True)
 
 # Global execution mode tracking
@@ -93,13 +87,149 @@ def set_execution_mode(mode: str):
         mode = "production"
     
     EXECUTION_MODE = mode
-    logger.info(f"Execution mode set to: {mode}")
+    # Only log mode changes in test mode to avoid verbose output
+    if mode == "test":
+        logger.info(f"Execution mode set to: {mode}")
 
 
 def get_execution_mode() -> str:
     """Get the current execution mode"""
     global EXECUTION_MODE
     return EXECUTION_MODE
+
+
+# Feature Extraction Helper Functions
+def extract_fuel_from_spec(spec_text: str) -> str:
+    """
+    Extract fuel type from specification text.
+
+    Args:
+        spec_text: Vehicle specification text
+
+    Returns:
+        Fuel type string or None if not found
+    """
+    if not spec_text:
+        return None
+
+    spec_lower = str(spec_text).lower()
+
+    # Extended fuel type patterns including common automotive codes
+    fuel_patterns = {
+        'Diesel': ['diesel', 'tdi', 'hdi', 'dci', 'cdti', 'crdi', 'd4d', 'dtec', 'bluetec'],
+        'Petrol': ['petrol', 'gasoline', 'tsi', 'tfsi', 'vti', 'gti', 'turbo', 'i-vtec', 'mpi'],
+        'Hybrid': ['hybrid', 'hev'],
+        'Plugin Hybrid': ['plugin hybrid', 'plug-in hybrid', 'phev', 'e-hybrid'],
+        'Electric': ['electric', 'ev', 'bev', 'e-tron', 'i3', 'leaf', 'tesla']
+    }
+
+    # Check each fuel type pattern
+    for fuel_type, patterns in fuel_patterns.items():
+        for pattern in patterns:
+            if pattern in spec_lower:
+                return fuel_type
+
+    # BMW/Audi specific patterns
+    import re
+    if re.search(r'\d{3}i\b', spec_lower):  # Matches patterns like 320i, 330i, etc. (petrol)
+        return 'Petrol'
+    if re.search(r'\d{3}d\b', spec_lower):  # Matches patterns like 320d, 330d, etc. (diesel)
+        return 'Diesel'
+
+    # Mercedes patterns (e.g., C200, E350)
+    if re.search(r'[a-z]\d{3}\b', spec_lower) and 'tdi' not in spec_lower and 'hdi' not in spec_lower:
+        return 'Petrol'
+
+    return None
+
+
+def extract_transmission_from_spec(spec_text: str) -> str:
+    """
+    Extract transmission type from specification text.
+
+    Args:
+        spec_text: Vehicle specification text
+
+    Returns:
+        Transmission type string or None if not found
+    """
+    if not spec_text:
+        return None
+
+    spec_lower = str(spec_text).lower()
+
+    # Extended transmission patterns
+    transmission_patterns = {
+        'Automatic': ['automatic', 'auto', 'tiptronic', 'multitronic', 'steptronic', 'powershift'],
+        'Manual': ['manual', 'stick', 'mt', '5dr', '3dr'],  # dr patterns often indicate manual
+        'Semi-Auto': ['semi-auto', 'semi auto', 'automated manual', 'amt'],
+        'CVT': ['cvt', 'continuously variable'],
+        'DSG': ['dsg', 'dual clutch', 's tronic', 'pdk', 'edc']
+    }
+
+    # Check each transmission pattern
+    for trans_type, patterns in transmission_patterns.items():
+        for pattern in patterns:
+            if pattern in spec_lower:
+                return trans_type
+
+    # Additional patterns with regex
+    import re
+
+    # Look for specific gear patterns (e.g., "6-speed auto", "5-speed manual")
+    if re.search(r'\d-speed auto|\d speed auto', spec_lower):
+        return 'Automatic'
+    if re.search(r'\d-speed manual|\d speed manual', spec_lower):
+        return 'Manual'
+
+    # BMW/Audi xDrive, AWD systems often come with auto
+    if 'xdrive' in spec_lower or 'quattro' in spec_lower or '4matic' in spec_lower:
+        return 'Automatic'
+
+    return None
+
+
+def clean_spec_for_ml(spec_text: str) -> str:
+    """
+    Clean specification text for ML analysis by removing technical details
+    and keeping only meaningful trim/variant information.
+
+    Args:
+        spec_text: Raw specification text
+
+    Returns:
+        Cleaned specification suitable for ML analysis
+    """
+    if not spec_text:
+        return ""
+
+    import re
+
+    # Start with the original spec
+    cleaned = str(spec_text).strip()
+
+    # Remove engine size patterns at the beginning (e.g., "2.0", "1.6", "3.0")
+    cleaned = re.sub(r'^\d+\.\d+\s+', '', cleaned)
+
+    # Remove transmission indicators
+    transmission_patterns = [
+        r'\s+Auto\b', r'\s+Manual\b', r'\s+Automatic\b', r'\s+DSG\b',
+        r'\s+CVT\b', r'\s+Tiptronic\b', r'\s+Multitronic\b'
+    ]
+    for pattern in transmission_patterns:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+    # Remove Euro emissions and door patterns (e.g., "Euro 6 (s/s) 4dr", "Euro 5 3dr")
+    cleaned = re.sub(r'\s+Euro\s+\d+\s*\([^)]*\)\s*\d+dr\s*$', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s+Euro\s+\d+\s+\d+dr\s*$', '', cleaned, flags=re.IGNORECASE)
+
+    # Remove standalone door patterns at the end (e.g., "5dr", "3dr", "4dr")
+    cleaned = re.sub(r'\s+\d+dr\s*$', '', cleaned, flags=re.IGNORECASE)
+
+    # Remove extra whitespace
+    cleaned = ' '.join(cleaned.split())
+
+    return cleaned
 
 
 # Data Collection Functions
@@ -119,92 +249,25 @@ def get_execution_mode() -> str:
 #     return f"{base_url}?{'&'.join(params)}"
 
 
-def get_cache_filename(make: str, model: str = None, data_type: str = 'all_listings') -> str:
-    """Generate a consistent cache filename based on make/model and data type
-    
-    Args:
-        make: Car manufacturer (e.g., 'bmw')
-        model: Car model (e.g., '3-series')
-        data_type: Type of data (all_listings or retail_prices)
-        
-    Returns:
-        Cache filename
-    """
-    model_part = model or 'all'
-    return os.path.join(CACHE_DIR, f"{make}_{model_part}_{data_type}.json")
 
 
-def save_to_cache(data: List[Dict[str, Any]], make: str, model: str = None, data_type: str = 'all_listings') -> bool:
-    """Save data to cache file
-    
-    Args:
-        data: Data to save
-        make: Car manufacturer
-        model: Car model
-        data_type: Type of data (all_listings or retail_prices)
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    cache_file = get_cache_filename(make, model, data_type)
-    try:
-        with open(cache_file, 'w') as f:
-            json.dump(data, f, indent=2)
-        logger.info(f"Saved {len(data)} items to cache: {cache_file}")
-        return True
-    except Exception as e:
-        logger.error(f"Error saving to cache {cache_file}: {e}")
-        return False
-
-
-def load_from_cache(make: str, model: str = None, data_type: str = 'all_listings') -> List[Dict[str, Any]]:
-    """Load data from cache file
-    
-    Args:
-        make: Car manufacturer
-        model: Car model
-        data_type: Type of data (all_listings or retail_prices)
-        
-    Returns:
-        Cached data or empty list if cache not found or invalid
-    """
-    cache_file = get_cache_filename(make, model, data_type)
-    if not os.path.exists(cache_file):
-        print("📂 Cache: Not found")
-        print()
-        return []
-        
-    try:
-        with open(cache_file, 'r') as f:
-            data = json.load(f)
-        logger.info(f"Loaded {len(data)} items from cache: {cache_file}")
-        return data
-    except Exception as e:
-        logger.error(f"Error loading from cache {cache_file}: {e}")
-        return []
-
-
-def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cache: bool = True, verify_ssl: bool = True, use_proxy: bool = False) -> List[Dict[str, Any]]:
+def scrape_listings(make: str, model: str = None, max_pages: int = None, verify_ssl: bool = True, use_proxy: bool = False) -> List[Dict[str, Any]]:
     """Scrape car listings for a given make and model
-    
+
     Args:
         make: Car manufacturer (e.g., 'bmw')
         model: Car model (e.g., '3-series')
         max_pages: Maximum number of pages to scrape (None for all available pages)
-        use_cache: Whether to check for cached data before scraping
         verify_ssl: Whether to verify SSL certificates (set to False to ignore SSL errors)
         use_proxy: Whether to use proxy rotation for scraping
-    
+
     Returns:
         List of dictionaries containing car listing details
     """
-    # Try to load from cache first if use_cache is True
-    if use_cache:
-        cached_listings = load_from_cache(make, model, 'all_listings')
-        if cached_listings:
-            print(f"📂 Cache: Found {len(cached_listings)} listings")
-            print()
-            return cached_listings
+    # Group structure is handled by scraping.py orchestrator
+    # No need to duplicate it here
+
+    # This function is kept for backwards compatibility but shouldn't be called
     
     # Initialize proxy manager if proxy rotation is enabled
     proxy_manager = None
@@ -227,7 +290,7 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
     
     # Initialize the AutoTrader API client from your main code
     api_client = AutoTraderAPIClient(verify_ssl=verify_ssl, proxy=proxy, proxy_manager=proxy_manager)
-    
+
     try:
         # Use parallel API scraping for maximum speed, fallback to sequential mileage splitting
         try:
@@ -236,13 +299,15 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
         except ImportError:
             use_parallel = True  # Default to parallel if config unavailable
 
+        # Scraping start is handled by orchestrator
+
         cars = api_client.get_all_cars_parallel(
             make=make,
             model=model,
             max_pages=max_pages,  # Passing None to get all pages
             use_parallel=use_parallel
         )
-        
+
         # Convert the listings to a consistent format
         listings = []
         for car in cars:
@@ -259,7 +324,6 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
                 'engine_size': car.get('engine_size'),
                 'fuel_type': car.get('fuel_type'),
                 'transmission': car.get('transmission'),
-                'body_type': car.get('body_type'),
                 'doors': car.get('doors'),
                 
                 # Additional data
@@ -270,21 +334,31 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
                 'location': car.get('location', ''),
                 
                 # Keep original spec unchanged from API (trim/variant info like "R-Line", "AMG Line")
-                'spec': car.get('spec', ''),
-                
-                # Market value will be added later for dealer listings (from scraping) or private listings (from ML prediction)
-                'market_value': None
+                'spec': car.get('spec', '')
             }
-            
+
+            # Apply fallback extraction for missing fuel_type and transmission from spec
+            spec_text = car.get('spec', '')
+
+            # Only extract fuel_type if API didn't provide it or it's empty/None
+            if not listing.get('fuel_type'):
+                extracted_fuel = extract_fuel_from_spec(spec_text)
+                if extracted_fuel:
+                    listing['fuel_type'] = extracted_fuel
+
+            # Only extract transmission if API didn't provide it or it's empty/None
+            if not listing.get('transmission'):
+                extracted_transmission = extract_transmission_from_spec(spec_text)
+                if extracted_transmission:
+                    listing['transmission'] = extracted_transmission
+
+            # Clean the spec text for ML analysis before caching
+            listing['spec'] = clean_spec_for_ml(spec_text)
+
             listings.append(listing)
         
-        print(f"📊 Results: {len(listings)} listings found")
-        print()
-        
-        # Save to cache if we have data
-        if listings:
-            save_to_cache(listings, make, model, 'all_listings')
-            
+        # Scraping result is handled by orchestrator with proper timing
+
         return listings
         
     except Exception as e:
@@ -292,54 +366,20 @@ def scrape_listings(make: str, model: str = None, max_pages: int = None, use_cac
         return []
 
 
-def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, model: str = None, use_cache: bool = True, use_proxy: bool = False) -> List[Dict[str, Any]]:
+def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, model: str = None, use_proxy: bool = False, quiet_mode: bool = False) -> List[Dict[str, Any]]:
     """Enrich dealer listings with price marker data using parallel processing
-    
+
     Args:
         listings: List of car listings
-        make: Car manufacturer (for cache filename)
-        model: Car model (for cache filename)
-        use_cache: Whether to check for cached retail prices
-        
+        make: Car manufacturer (for identification)
+        model: Car model (for identification)
+        use_proxy: Whether to use proxy rotation for scraping
+        quiet_mode: If True, suppress banner output for clean logging
+
     Returns:
         Enriched listings with price_vs_market field added
     """
-    # Try to load from cache first if use_cache is True and make/model are provided
-    if use_cache and make is not None:
-        cached_retail_prices = load_from_cache(make, model, 'retail_prices')
-        if cached_retail_prices:
-            logger.info(f"Using {len(cached_retail_prices)} cached retail prices for {make} {model or ''}")
-            
-            # Create a lookup dictionary from cached data
-            retail_price_lookup = {}
-            for item in cached_retail_prices:
-                if 'url' in item and 'price_vs_market' in item:
-                    retail_price_lookup[item['url']] = item['price_vs_market']
-            
-            # Apply cached retail prices to listings with matching URLs
-            enriched_listings = []
-            cache_hit_count = 0
-            
-            for listing in listings:
-                url = listing.get('url', '')
-                if url and url in retail_price_lookup:
-                    # Use cached price_vs_market value
-                    enriched_listing = {**listing, 'price_vs_market': retail_price_lookup[url]}
-                    enriched_listings.append(enriched_listing)
-                    cache_hit_count += 1
-                else:
-                    # No cached data for this URL - skip this listing for training
-                    # We should not default to 0.0 as this creates noise in training data
-                    logger.debug(f"Skipping listing without cached price marker: {listing.get('make', '')} {listing.get('model', '')}")
-                    continue
-            
-            logger.info(f"Applied {cache_hit_count}/{len(listings)} cached retail prices")
-            
-            # If we have a good cache hit rate (>80%), use the cached data
-            if len(listings) > 0 and cache_hit_count / len(listings) >= 0.8:
-                return enriched_listings
-            else:
-                logger.info(f"Cache hit rate too low ({cache_hit_count}/{len(listings)}), fetching fresh data")
+    # Process retail prices from listings
     
     # Filter out listings without URLs
     valid_listings = []
@@ -353,35 +393,50 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
             logger.warning(f"Skipping listing without URL: {listing.get('make', '')} {listing.get('model', '')}")
     
     total_urls = len(valid_urls)
-    logger.info(f"Starting to process {total_urls} URLs in parallel for price markers")
-    print(f"\n{'='*60}")
-    print(f"PRICE MARKER SCRAPING: {total_urls} URLs")
-    print(f"{'='*60}")
-    
+    logger.debug(f"Starting to process {total_urls} URLs in parallel for price markers")
+
+    # Initialize dynamic progress display (replaces static banners)
+    progress_display = None
+    # Disabled to prevent duplication with OutputManager
+    # if not quiet_mode:
+    #     from services.progress_display import DynamicProgressDisplay
+    #     progress_display = DynamicProgressDisplay(total_urls, "🔍 Scraping Retail Prices")
+
     if not valid_urls:
         return []
     
     # Create a progress display function
     start_time = datetime.now()
-    
+
+    # Initialize retail price scraping display
+    from src.output_manager import get_output_manager
+    output_manager = get_output_manager()
+
     def progress_callback(completed, total):
-        # Calculate time elapsed and estimated time remaining
-        elapsed = datetime.now() - start_time
-        if completed > 0:
-            avg_time_per_item = elapsed.total_seconds() / completed
-            remaining_items = total - completed
-            est_time_remaining = remaining_items * avg_time_per_item
-            
-            # Format as minutes and seconds
-            minutes, seconds = divmod(est_time_remaining, 60)
-            time_str = f"{int(minutes)}m {int(seconds)}s"
-            
-            # Calculate speed (items per minute)
-            if elapsed.total_seconds() > 0:
-                speed = completed * 60 / elapsed.total_seconds()
-                
-                # Add speed and time info to progress report
-                logger.info(f"Progress: {completed}/{total} ({completed/total:.1%}) - Speed: {speed:.1f} URLs/min - Est. remaining: {time_str}")
+        # Update via OutputManager for coordinated display
+        if completed == 0:
+            # First call - show initial status
+            output_manager.progress_update(0, total, "retail_prices", 0, "Calculating...")
+        else:
+            # Calculate stats
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            speed = (completed * 60 / elapsed_time) if elapsed_time > 0 else 0
+
+            # Calculate ETA
+            if completed < total:
+                avg_time_per_item = elapsed_time / completed
+                remaining_items = total - completed
+                eta_seconds = remaining_items * avg_time_per_item
+                if eta_seconds < 60:
+                    eta_str = f"{int(eta_seconds)}s"
+                else:
+                    eta_minutes = int(eta_seconds // 60)
+                    eta_seconds_remainder = int(eta_seconds % 60)
+                    eta_str = f"{eta_minutes}m {eta_seconds_remainder}s"
+            else:
+                eta_str = "Complete!"
+
+            output_manager.progress_update(completed, total, "retail_prices", speed, eta_str)
     
     # Initialize proxy manager if proxy rotation is enabled
     proxy_manager = None
@@ -399,61 +454,51 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
     try:
         # Use sequential processing with 7 workers (no batching)
         # This eliminates resource conflicts and browser crashes
-        global EXECUTION_MODE
+        # Initialize progress display once here
+        output_manager.progress_update(0, total_urls, "retail_prices", 0, "Starting...")
+
         results = batch_scrape_price_markers(
             valid_urls,
             headless=True,
             progress_callback=progress_callback,
             test_mode=(EXECUTION_MODE == "test")
         )
-        
-        print(f"\n{'='*60}")
-        print(f"PROCESSING RESULTS")
-        print(f"{'='*60}")
-        
+
         # Merge price marker data with original listings
         enriched_listings = []
         success_count = 0
         error_count = 0
-        
-        # Also create a list to store retail price data for caching
-        retail_prices_cache = []
-        
+
         for listing in valid_listings:
             url = listing['url']
-            
+
             if url in results:
                 price_marker = results[url]
-                
-                # Check if this is an error result
-                if 'Error' in price_marker.get('marker_text', ''):
+
+                # Check if this is an error result or no valid price difference found
+                if ('Error' in price_marker.get('marker_text', '') or
+                    not price_marker.get('price_difference_found', False)):
                     error_count += 1
-                    # Only log errors in test mode to avoid spam
+                    # Only log in test mode to avoid spam
                     if EXECUTION_MODE == "test":
-                        logger.warning(f"Error for {listing.get('make', '')} {listing.get('model', '')}: {price_marker.get('marker_text', 'Unknown error')}")
-                    # Skip this listing instead of defaulting to 0.0 - prevents bad training data
-                    logger.debug(f"Skipping listing with scraping error: {listing.get('make', '')} {listing.get('model', '')}")
+                        if 'Error' in price_marker.get('marker_text', ''):
+                            logger.warning(f"Scraping error for {listing.get('make', '')} {listing.get('model', '')}: {price_marker.get('marker_text', 'Unknown error')}")
+                        else:
+                            logger.debug(f"No valid price difference found for {listing.get('make', '')} {listing.get('model', '')}")
                     continue
                 else:
-                    # Successful result
+                    # Successful result with valid price difference
                     success_count += 1
                     market_difference = price_marker['market_difference']
-                    
+
                     # Add price marker data to the listing
-                    enriched_listing = {**listing, 'price_vs_market': market_difference}
-                    enriched_listings.append(enriched_listing)
-                    
-                    # Add to retail prices cache
-                    retail_prices_cache.append({
-                        'url': url,
+                    enriched_listing = {
+                        **listing,
                         'price_vs_market': market_difference,
-                        'make': listing.get('make', ''),
-                        'model': listing.get('model', '')
-                    })
-                    
-                    # Log but don't spam console
-                    if success_count % 10 == 0:  # Log every 10th success
-                        logger.info(f"Enriched {success_count} listings with price markers")
+                        'market_value': price_marker.get('market_value', 0)
+                    }
+                    enriched_listings.append(enriched_listing)
+
             else:
                 # URL was processed but no result - skip this listing
                 error_count += 1
@@ -464,22 +509,8 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
                 logger.debug(f"Skipping listing without price marker result: {listing.get('make', '')} {listing.get('model', '')}")
                 continue
         
-        # Save retail prices to cache if we have data and make/model are provided
-        if retail_prices_cache and make is not None:
-            save_to_cache(retail_prices_cache, make, model, 'retail_prices')
-        
-        # Final summary
-        total_time = datetime.now() - start_time
-        minutes, seconds = divmod(total_time.total_seconds(), 60)
-        
-        print(f"\n{'='*60}")
-        print(f"PRICE MARKER SCRAPING COMPLETE")
-        print(f"{'='*60}")
-        print(f"Total time: {int(minutes)}m {int(seconds)}s")
-        print(f"Successful: {success_count}/{total_urls} ({success_count/total_urls:.1%})")
-        print(f"Failed: {error_count}/{total_urls} ({error_count/total_urls:.1%})")
-        print(f"Average speed: {total_urls*60/total_time.total_seconds():.1f} URLs/minute")
-        print(f"{'='*60}\n")
+        # Complete the progress display (replaces static completion banner)
+        output_manager.progress_complete("retail_prices")
                 
     except Exception as e:
         logger.error(f"Error in batch price marker processing: {e}")
@@ -487,42 +518,39 @@ def enrich_with_price_markers(listings: List[Dict[str, Any]], make: str = None, 
         logger.warning("Falling back to sequential processing")
         
         enriched_listings = []
-        retail_prices_cache = []
         total = len(valid_listings)
-        
-        print("\nFalling back to sequential processing...")
-        
+
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.warning("Falling back to sequential processing")
+
         for i, listing in enumerate(valid_listings):
             try:
                 # Show progress for sequential processing too
-                print(f"\rProgress: {i+1}/{total} ({(i+1)/total:.1%})", end="", flush=True)
-                
+                # Progress handled silently for sequential processing
+
                 # Scrape price marker for this listing
                 price_marker = scrape_price_marker(listing['url'])
-                
+
+                # Only process if we found a valid price difference
+                if (not price_marker.get('price_difference_found', False) or
+                    'Error' in price_marker.get('marker_text', '')):
+                    # Skip this listing - no valid price difference
+                    continue
+
                 # Add price marker data to the listing
-                enriched_listing = {**listing, 'price_vs_market': price_marker['market_difference']}
-                enriched_listings.append(enriched_listing)
-                
-                # Add to retail prices cache
-                retail_prices_cache.append({
-                    'url': listing['url'],
+                enriched_listing = {
+                    **listing,
                     'price_vs_market': price_marker['market_difference'],
-                    'make': listing.get('make', ''),
-                    'model': listing.get('model', '')
-                })
-                
+                    'market_value': price_marker.get('market_value', 0)
+                }
+                enriched_listings.append(enriched_listing)
+
             except Exception as e:
                 logger.error(f"Error enriching listing with price marker: {e}")
                 # Skip listing with exception instead of defaulting to 0.0
                 logger.debug(f"Skipping listing due to processing error: {listing.get('make', '')} {listing.get('model', '')}")
                 continue
-        
-        print("\nSequential processing complete")
-        
-        # Save retail prices to cache if we have data and make/model are provided
-        if retail_prices_cache and make is not None:
-            save_to_cache(retail_prices_cache, make, model, 'retail_prices')
     
     return enriched_listings
 
@@ -539,10 +567,10 @@ def filter_listings_by_seller_type(listings: List[Dict[str, Any]], seller_type: 
     """
     # Debug seller types
     seller_types = set(listing.get('seller_type', 'Unknown') for listing in listings)
-    logger.info(f"Found seller types in data: {seller_types}")
+    logger.debug(f"Found seller types in data: {seller_types}")
     
     filtered = [listing for listing in listings if listing.get('seller_type') == seller_type]
-    logger.info(f"Filtered {len(filtered)} {seller_type.lower()} listings from {len(listings)} total")
+    logger.debug(f"Filtered {len(filtered)} {seller_type.lower()} listings from {len(listings)} total")
     return filtered
 
 
@@ -651,67 +679,64 @@ def prepare_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
             'tech': ['panoramic', 'leather', 'navigation', 'tech pack', 'dsg']
         }
 
-        # Initialize spec_numeric with base category (1 = base, 2 = sport, 3 = luxury, 4 = awd, 5 = tech)
-        df['spec_numeric'] = 1  # Default to base
+        # Create unique spec encoding - each spec gets its own ID
+        # Use the already processed spec_text column that was created earlier
+        spec_codes, spec_uniques = pd.factorize(df['spec_text'])
+        df['spec_numeric'] = spec_codes + 1
 
-        # Categorize each spec based on content
-        for idx, row in df.iterrows():
-            if pd.notna(row.get('spec_text')):
-                spec_text = row['spec_text'].lower()
-
-                # Check categories in order of priority (sport/luxury override base)
-                if any(trim in spec_text for trim in spec_categories['luxury']):
-                    df.at[idx, 'spec_numeric'] = 3  # Luxury
-                elif any(trim in spec_text for trim in spec_categories['sport']):
-                    df.at[idx, 'spec_numeric'] = 2  # Sport
-                elif any(trim in spec_text for trim in spec_categories['awd']):
-                    df.at[idx, 'spec_numeric'] = 4  # AWD
-                elif any(trim in spec_text for trim in spec_categories['tech']):
-                    df.at[idx, 'spec_numeric'] = 5  # Tech
-                else:
-                    # Check if it matches base category, otherwise keep default
-                    if any(trim in spec_text for trim in spec_categories['base']):
-                        df.at[idx, 'spec_numeric'] = 1  # Base
-                
-        # Log some statistics about spec_numeric
+        logger.info(f"Found {len(spec_uniques)} unique specs in legacy analyzer dataset")
         logger.info(f"spec_numeric stats: min={df['spec_numeric'].min():.2f}, max={df['spec_numeric'].max():.2f}, mean={df['spec_numeric'].mean():.2f}")
     else:
         # Default spec_numeric if no spec column
         df['spec_numeric'] = 1.0
     
-    # Extract and encode fuel type (if available)
+    # Extract and encode fuel type (fallback for missing values only)
     if spec_column in df.columns:
-        # Extract fuel type from spec
-        df['fuel_type'] = 'Unknown'
+        # Only fill missing fuel_type values, don't overwrite existing ones
+        if 'fuel_type' not in df.columns:
+            df['fuel_type'] = 'Unknown'
+
         fuel_types = ['Petrol', 'Diesel', 'Hybrid', 'Electric', 'Plugin Hybrid']
-        
+
         for idx, row in df.iterrows():
-            if pd.notna(row.get(spec_column)):
+            # Only extract if fuel_type is missing/None/Unknown
+            if (not row.get('fuel_type') or row.get('fuel_type') == 'Unknown') and pd.notna(row.get(spec_column)):
                 spec_text = str(row[spec_column]).lower()
                 for fuel in fuel_types:
                     if fuel.lower() in spec_text:
                         df.at[idx, 'fuel_type'] = fuel
                         break
+                # If still no fuel type found, keep as Unknown
+                if not df.at[idx, 'fuel_type'] or df.at[idx, 'fuel_type'] == '':
+                    df.at[idx, 'fuel_type'] = 'Unknown'
     else:
         # Ensure fuel_type exists even if spec doesn't
-        df['fuel_type'] = 'Unknown'
+        if 'fuel_type' not in df.columns:
+            df['fuel_type'] = 'Unknown'
     
-    # Extract and encode transmission (if available)
+    # Extract and encode transmission (fallback for missing values only)
     if spec_column in df.columns:
-        # Extract transmission from spec
-        df['transmission'] = 'Unknown'
+        # Only fill missing transmission values, don't overwrite existing ones
+        if 'transmission' not in df.columns:
+            df['transmission'] = 'Unknown'
+
         transmission_types = ['Automatic', 'Manual', 'Semi-Auto', 'CVT', 'DSG']
-        
+
         for idx, row in df.iterrows():
-            if pd.notna(row.get(spec_column)):
+            # Only extract if transmission is missing/None/Unknown
+            if (not row.get('transmission') or row.get('transmission') == 'Unknown') and pd.notna(row.get(spec_column)):
                 spec_text = str(row[spec_column]).lower()
                 for trans in transmission_types:
                     if trans.lower() in spec_text:
                         df.at[idx, 'transmission'] = trans
                         break
+                # If still no transmission found, keep as Unknown
+                if not df.at[idx, 'transmission'] or df.at[idx, 'transmission'] == '':
+                    df.at[idx, 'transmission'] = 'Unknown'
     else:
         # Ensure transmission exists even if spec doesn't
-        df['transmission'] = 'Unknown'
+        if 'transmission' not in df.columns:
+            df['transmission'] = 'Unknown'
     
     # Convert fuel_type and transmission from categorical to numeric values
     # Map categorical values to numeric for ML model compatibility
@@ -928,30 +953,273 @@ def load_or_train_model(
     model: str,
     dealer_data: List[Dict[str, Any]]
 ) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler]]:
-    """Load existing model-specific model (training disabled for automated workflow)
+    """Load existing model or automatically train if missing
 
     Args:
         make: Car manufacturer
         model: Car model
-        dealer_data: List of dealer listings (unused - kept for compatibility)
+        dealer_data: List of dealer listings for training if needed
 
     Returns:
-        Tuple of (XGBoost model, feature scaler) or (None, None) if model not found
+        Tuple of (XGBoost model, feature scaler) or (None, None) if training fails
     """
-    # Try to load existing model-specific model
-    from services.model_specific_trainer import load_model_specific
+    # Check if model exists and if it's too old before loading
+    model_age_days = get_model_age_days(make, model)
 
-    xgb_model, scaler = load_model_specific(make, model)
+    if model_age_days < 999:  # Model exists
+        if model_age_days <= 14:  # Model is fresh
+            # Load existing fresh model
+            from services.model_specific_trainer import load_model_specific
+            xgb_model, scaler = load_model_specific(make, model)
+            if xgb_model is not None and scaler is not None:
+                from src.output_manager import get_output_manager
+                output_manager = get_output_manager()
+                output_manager.ml_model_status(f"Found existing model ({model_age_days} days old)")
+                output_manager.ml_model_status("Model ready - no training needed")
+                output_manager.ml_model_complete()
+                return xgb_model, scaler
+            else:
+                from src.output_manager import get_output_manager
+                output_manager = get_output_manager()
+                output_manager.ml_model_status("❌ Failed to load existing model - will retrain")
+        else:
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.ml_model_status(f"Found existing model ({model_age_days} days old)")
+            output_manager.ml_model_status("Model too old - retraining needed")
+    else:
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.ml_model_status("No model found - training needed")
 
-    if xgb_model is not None and scaler is not None:
-        logger.info(f"Loaded existing model-specific model for {make} {model}")
-        return xgb_model, scaler
+    # Proceed with automatic training (either no model or old model)
+    # Check if we have enough dealer data for training
+    if not dealer_data or len(dealer_data) < 5:
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.ml_model_status(f"❌ Insufficient dealer data (need 5, have {len(dealer_data) if dealer_data else 0})")
+        output_manager.ml_model_complete()
+        return None, None
 
-    # Model not found - no on-demand training in automated workflow
-    logger.warning(f"No existing model found for {make} {model}. Models should be trained via daily training schedule.")
-    logger.warning(f"Run 'python ml/daily_training.py' or 'python main.py --training-only' to train models.")
+    try:
+        # Import training function
+        from services.model_specific_trainer import train_model_specific
 
-    return None, None
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.ml_model_status(f"Training model with {len(dealer_data)} dealer listings...")
+
+        # Debug: Check if dealer_data has market_value
+        market_value_count = len([d for d in dealer_data if d.get('market_value') and d.get('market_value') > 0])
+        if market_value_count > 0:
+            output_manager.ml_model_status(f"Debug: Found {market_value_count} listings with market_value data")
+        else:
+            output_manager.ml_model_status(f"Debug: No listings have market_value data - training will likely fail")
+
+        # Attempt to train the model with timeout
+        import threading
+        training_result = [None]
+        training_error = [None]
+
+        def training_worker():
+            try:
+                training_result[0] = train_model_specific(make, model, dealer_data)
+            except Exception as e:
+                training_error[0] = e
+
+        # Start training in separate thread with timeout
+        training_thread = threading.Thread(target=training_worker)
+        training_thread.daemon = True
+        training_thread.start()
+        training_thread.join(timeout=600)  # 10 minutes timeout
+
+        if training_thread.is_alive():
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.ml_model_status("❌ Model training timed out after 10 minutes")
+            output_manager.ml_model_complete()
+            return None, None
+        elif training_error[0]:
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+
+            # Check if error is related to missing market_value data
+            error_str = str(training_error[0]).lower()
+            is_market_value_error = ('market_value' in error_str or
+                                   'no valid features prepared' in error_str or
+                                   'cannot train without real market prices' in error_str)
+
+            if is_market_value_error and is_retail_scraping_due():
+                output_manager.ml_model_status("❌ Training failed due to missing market_value data")
+                output_manager.ml_model_status("⚠️ Retail scraping is due - triggering automatic retail price scraping")
+
+                # Trigger automatic retail price scraping
+                try:
+                    from services.price_scraper import batch_scrape_price_markers
+
+                    # Get listings for retail price scraping
+                    retail_listings = [listing for listing in listings if listing.get('url')]
+                    if retail_listings:
+                        output_manager._print("")
+
+                        # Scrape retail prices using batch scraper
+                        retail_data = batch_scrape_price_markers(
+                            [listing['url'] for listing in retail_listings],
+                            headless=True,
+                            test_mode=False
+                        )
+
+                        if retail_data:
+                            # batch_scrape_price_markers returns a dict: {url: result_data}
+                            # Transform it to the format expected by the code
+                            url_to_market_value = {url: result.get('market_value')
+                                                 for url, result in retail_data.items()
+                                                 if result.get('market_value') and result.get('market_value') > 0}
+
+                            # Update dealer_data with market values
+                            updated_dealer_data = []
+                            for listing in dealer_data:
+                                url = listing.get('url', '')
+                                if url in url_to_market_value:
+                                    listing_copy = listing.copy()
+                                    listing_copy['market_value'] = url_to_market_value[url]
+                                    updated_dealer_data.append(listing_copy)
+                                else:
+                                    updated_dealer_data.append(listing)
+
+                            output_manager.ml_model_status(f"Updated {len([d for d in updated_dealer_data if d.get('market_value')])} listings with market values")
+
+                            # Retry training with updated data
+                            output_manager.ml_model_status("Retrying model training with market value data...")
+
+                            # Reset training variables for retry
+                            training_result_retry = [None]
+                            training_error_retry = [None]
+
+                            def training_worker_retry():
+                                try:
+                                    training_result_retry[0] = train_model_specific(make, model, updated_dealer_data)
+                                except Exception as e:
+                                    training_error_retry[0] = e
+
+                            # Retry training
+                            training_thread_retry = threading.Thread(target=training_worker_retry)
+                            training_thread_retry.daemon = True
+                            training_thread_retry.start()
+                            training_thread_retry.join(timeout=600)
+
+                            if training_thread_retry.is_alive():
+                                output_manager.ml_model_status("❌ Retry training timed out")
+                                output_manager.ml_model_complete()
+                                return None, None
+                            elif training_error_retry[0]:
+                                output_manager.ml_model_status(f"❌ Retry training failed: {training_error_retry[0]}")
+                                output_manager.ml_model_complete()
+                                return None, None
+                            elif training_result_retry[0]:
+                                # Training succeeded after retail scraping
+                                from services.model_specific_trainer import load_model_specific
+                                xgb_model, scaler = load_model_specific(make, model)
+                                if xgb_model is not None and scaler is not None:
+                                    output_manager.ml_model_status("✅ Successfully trained model after retail price scraping")
+
+                                    # Mark retail scraping as completed
+                                    from config.config import mark_retail_scraping_completed
+                                    mark_retail_scraping_completed()
+
+                                    output_manager.ml_model_complete()
+                                    return xgb_model, scaler
+                                else:
+                                    output_manager.ml_model_status("❌ Training succeeded but failed to load model")
+                                    output_manager.ml_model_complete()
+                                    return None, None
+                            else:
+                                output_manager.ml_model_status("❌ Retry training returned no result")
+                                output_manager.ml_model_complete()
+                                return None, None
+                        else:
+                            output_manager.ml_model_status("❌ Retail price scraping returned no data")
+                            output_manager.ml_model_complete()
+                            return None, None
+                    else:
+                        output_manager.ml_model_status("❌ No listings with URLs available for retail price scraping")
+                        output_manager.ml_model_complete()
+                        return None, None
+
+                except Exception as scraping_error:
+                    output_manager.ml_model_status(f"❌ Automatic retail price scraping failed: {scraping_error}")
+                    output_manager.ml_model_complete()
+                    return None, None
+            else:
+                # Original error handling for non-market_value errors
+                output_manager.ml_model_status(f"❌ Model training failed: {training_error[0]}")
+                output_manager.ml_model_complete()
+                return None, None
+        else:
+            success = training_result[0]
+
+        if success:
+            # Try to load the newly trained model
+            from services.model_specific_trainer import load_model_specific
+            xgb_model, scaler = load_model_specific(make, model)
+            if xgb_model is not None and scaler is not None:
+                from src.output_manager import get_output_manager
+                output_manager = get_output_manager()
+                output_manager.ml_model_status("Successfully trained and loaded model")
+                output_manager.ml_model_complete()
+                return xgb_model, scaler
+            else:
+                from src.output_manager import get_output_manager
+                output_manager = get_output_manager()
+                output_manager.ml_model_status("❌ Model training appeared successful but failed to load")
+                output_manager.ml_model_complete()
+                return None, None
+        else:
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.ml_model_status("❌ Failed to train model")
+            output_manager.ml_model_complete()
+            return None, None
+
+    except Exception as e:
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.ml_model_status(f"❌ Error during training: {str(e)}")
+        output_manager.ml_model_complete()
+        return None, None
+
+
+def get_model_age_days(make: str, model: str) -> int:
+    """Get the age of a model in days by checking its file modification time
+
+    Args:
+        make: Car manufacturer
+        model: Car model
+
+    Returns:
+        Age in days, or 999 if model doesn't exist
+    """
+    try:
+        from services.daily_trainer import DailyModelTrainingOrchestrator
+        trainer = DailyModelTrainingOrchestrator()
+        model_file, scaler_file = trainer.get_model_path(make, model)
+
+        if model_file.exists():
+            import os
+            from datetime import datetime
+
+            # Get file modification time
+            mod_time = os.path.getmtime(model_file)
+            mod_datetime = datetime.fromtimestamp(mod_time)
+
+            # Calculate age in days
+            age_days = (datetime.now() - mod_datetime).days
+            return age_days
+        else:
+            return 999  # Model doesn't exist
+
+    except Exception:
+        return 999  # Error occurred, assume old
 
 
 # Prediction and Deal Analysis Functions
@@ -972,12 +1240,20 @@ def predict_market_values(
     """
     # Use model-specific feature preparation (no one-hot encoding)
     from services.model_specific_trainer import prepare_model_specific_features
+    from src.output_manager import get_output_manager
 
-    features_df = prepare_model_specific_features(private_listings)
+    output_manager = get_output_manager()
+
+    try:
+        features_df = prepare_model_specific_features(private_listings)
+    except Exception as e:
+        logger.error(f"Prediction preprocessing failed: {e}")
+        return pd.DataFrame()
 
     if features_df.empty:
         logger.warning("No valid features prepared for prediction")
         return pd.DataFrame()
+
 
     # Get feature columns for prediction (model-specific, no make/model encoding)
     feature_columns = ['asking_price', 'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric']
@@ -1001,24 +1277,30 @@ def predict_market_values(
     logger.info(f"Prediction features dtypes: {features_df[feature_columns].dtypes.to_dict()}")
     
     # Scale features using the same scaler from training
-    X_scaled = scaler.transform(features_df[feature_columns])
+    X_scaled = scaler.transform(features_df[feature_columns].values)
     
     # Make predictions using XGBoost
     dtest = xgb.DMatrix(X_scaled)
-    
+
     # Predict market values directly
     predicted_market_values = xgb_model.predict(dtest)
-    
+
     # Add predictions to DataFrame
     features_df['predicted_market_value'] = predicted_market_values
     
     # Calculate profit margin from the predicted market value
     features_df['predicted_profit_margin'] = (
-        (features_df['predicted_market_value'] - features_df['asking_price']) / 
+        (features_df['predicted_market_value'] - features_df['asking_price']) /
         features_df['asking_price']
     )
     
     # Join with original data to include all listing details
+    private_df = pd.DataFrame(private_listings)
+
+    # Ensure asking_price is numeric in private_df
+    private_df['asking_price'] = pd.to_numeric(private_df['asking_price'], errors='coerce')
+    private_df['mileage'] = pd.to_numeric(private_df['mileage'], errors='coerce')
+
     result = pd.merge(
         private_df,
         features_df[['predicted_market_value', 'predicted_profit_margin']],
@@ -1245,51 +1527,56 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
     """
     global EXECUTION_MODE
     
-    # Check if weekly retail scraping is due
-    if is_retail_scraping_due():
-        logger.info("🔄 Weekly retail scraping is due - running full training process...")
-        from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
-        training_success = run_weekly_training(
-            max_pages_per_model=max_pages,
-            verify_ssl=verify_ssl,
-            test_mode=(EXECUTION_MODE == "test")
-        )
-        
-        if not training_success:
-            logger.error("❌ Weekly training failed - falling back to individual model processing")
-            # Fall back to original individual model approach
-            _process_individual_model(make, model, max_pages, verify_ssl)
-            return
+    # NOTE: Automatic weekly training disabled - now handled by individual model retry logic
+    # This prevents early retail scraping during training phase
+    # Retail scraping now only happens when individual model training fails due to missing market_value
+    #
+    # # Check if weekly retail scraping is due
+    # if is_retail_scraping_due():
+    #     logger.info("🔄 Weekly retail scraping is due - running full training process...")
+    #     from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
+    #     training_success = run_weekly_training(
+    #         max_pages_per_model=max_pages,
+    #         verify_ssl=verify_ssl,
+    #         test_mode=(EXECUTION_MODE == "test")
+    #     )
+    #
+    #     if not training_success:
+    #         logger.error("❌ Weekly training failed - falling back to individual model processing")
+    #         # Fall back to original individual model approach
+    #         _process_individual_model(make, model, max_pages, verify_ssl)
+    #         return
     
-    # Load universal model for daily operations
-    if not is_universal_model_available():
-        logger.warning("⚠️ No universal model available - running weekly training first...")
-        from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
-        training_success = run_weekly_training(
-            max_pages_per_model=max_pages,
-            verify_ssl=verify_ssl,
-            test_mode=(EXECUTION_MODE == "test")
-        )
-        
-        if not training_success:
-            logger.error("❌ Training failed - falling back to individual model processing")
-            _process_individual_model(make, model, max_pages, verify_ssl)
-            return
-    
-    # Load the universal model
-    if not load_universal_model():
-        logger.error("❌ Failed to load universal model - falling back to individual processing")
-        _process_individual_model(make, model, max_pages, verify_ssl)
-        return
+    # NOTE: Automatic universal model training disabled - now use individual model approach
+    # This prevents early retail scraping and uses the controlled retry logic instead
+    #
+    # # Load universal model for daily operations
+    # if not is_universal_model_available():
+    #     logger.warning("⚠️ No universal model available - running weekly training first...")
+    #     from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
+    #     training_success = run_weekly_training(
+    #         max_pages_per_model=max_pages,
+    #         verify_ssl=verify_ssl,
+    #         test_mode=(EXECUTION_MODE == "test")
+    #     )
+    #
+    #     if not training_success:
+    #         logger.error("❌ Training failed - falling back to individual model processing")
+    #         _process_individual_model(make, model, max_pages, verify_ssl)
+    #         return
+
+    # Always use individual model processing to ensure controlled retail scraping
+    _process_individual_model(make, model, max_pages, verify_ssl)
+    return
     
     # Step 1: Scrape private listings only (minimal proxy usage for daily operations)
     logger.info(f"🔍 Scraping private listings for {make} {model or 'All Models'} (universal model mode)")
-    all_listings = scrape_listings(make, model, max_pages, use_cache=True, verify_ssl=verify_ssl, use_proxy=True)
+    all_listings = scrape_listings(make, model, max_pages, verify_ssl=verify_ssl, use_proxy=True)
     
     if not all_listings:
-        print(f"📊 Results: 0 listings found")
-        print()
-        print(f"❌ Error: No listings found for {make} {model or 'All Models'}")
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.error(f"No listings found for {make} {model or 'All Models'}")
         return
     
     # Step 2: Filter for private listings only (dealers already processed in weekly training)
@@ -1335,12 +1622,12 @@ def _process_individual_model(make: str, model: str = None, max_pages: int = Non
     
     logger.info(f"🔧 Processing {make} {model or 'All Models'} using individual model approach (fallback)")
     
-    # Step 1: Scrape all listings (always use cache and proxy)
-    all_listings = scrape_listings(make, model, max_pages, use_cache=True, verify_ssl=verify_ssl, use_proxy=True)
+    # Step 1: Scrape all listings
+    all_listings = scrape_listings(make, model, max_pages, verify_ssl=verify_ssl, use_proxy=True)
     if not all_listings:
-        print(f"📊 Results: 0 listings found")
-        print()
-        print(f"❌ Error: No listings found for {make} {model or 'All Models'}")
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.error(f"No listings found for {make} {model or 'All Models'}")
         return
     
     # Step 2: Separate dealer and private listings
@@ -1355,11 +1642,17 @@ def _process_individual_model(make: str, model: str = None, max_pages: int = Non
         logger.warning(f"No private listings found for {make} {model or 'all'}")
         return
     
-    # Step 3: Enrich dealer listings with price markers (always use cache and proxy)
-    enriched_dealer_listings = enrich_with_price_markers(dealer_listings, make, model, use_cache=True, use_proxy=True)
-    
-    # Collect retail price data for saving (if in test mode)
+    # Step 3: Check if existing model is available first (avoid unnecessary retail scraping)
+    model_age_days = get_model_age_days(make, model)
+
+    enriched_dealer_listings = dealer_listings  # Default to unprocessed dealer listings
     retail_price_data = []
+
+    # Always enrich with retail price markers when training is needed (regardless of model age)
+    # This ensures we have market_value data for ML training
+    enriched_dealer_listings = enrich_with_price_markers(dealer_listings, make, model, use_proxy=True, quiet_mode=True)
+
+    # Collect retail price data for saving (if in test mode)
     if EXECUTION_MODE == "test":
         for listing in enriched_dealer_listings:
             if 'price_vs_market' in listing and listing['price_vs_market'] != 0:
@@ -1371,7 +1664,7 @@ def _process_individual_model(make: str, model: str = None, max_pages: int = Non
                     'asking_price': listing.get('asking_price', 0),
                     'timestamp': datetime.now().isoformat()
                 })
-    
+
     # Step 4: Load or train model
     xgb_model, scaler = load_or_train_model(make, model, enriched_dealer_listings)
     if xgb_model is None or scaler is None:
@@ -1400,50 +1693,6 @@ def _process_individual_model(make: str, model: str = None, max_pages: int = Non
         logger.info(f"No profitable deals found for {make} {model or 'all'}")
 
 
-def test_cache_functionality(make: str, model: str) -> None:
-    """Test the data caching functionality without running the full model pipeline
-    
-    Args:
-        make: Car manufacturer
-        model: Car model
-    """
-    logger.info(f"\n{'='*60}\nTESTING CACHE FUNCTIONALITY FOR {make.upper()} {model.upper()}\n{'='*60}")
-    
-    # Check if cache files exist
-    all_listings_cache = get_cache_filename(make, model, 'all_listings')
-    retail_prices_cache = get_cache_filename(make, model, 'retail_prices')
-    
-    cache_exists = os.path.exists(all_listings_cache) and os.path.exists(retail_prices_cache)
-    logger.info(f"Cache files exist: {cache_exists}")
-    
-    if cache_exists:
-        # Test loading listings from cache
-        all_listings = load_from_cache(make, model, 'all_listings')
-        logger.info(f"Loaded {len(all_listings)} listings from cache")
-        
-        # Test loading retail prices from cache
-        retail_prices = load_from_cache(make, model, 'retail_prices')
-        logger.info(f"Loaded {len(retail_prices)} retail prices from cache")
-        
-        # Separate dealer and private listings to verify cache content
-        dealer_count = sum(1 for listing in all_listings if listing.get('seller_type') == 'Dealer')
-        private_count = sum(1 for listing in all_listings if listing.get('seller_type') == 'Private')
-        logger.info(f"Found {dealer_count} dealer listings and {private_count} private listings in cache")
-        
-        # Test the enrichment with retail prices
-        dealer_listings = filter_listings_by_seller_type(all_listings, "Dealer")
-        enriched_listings = enrich_with_price_markers(dealer_listings, make, model)
-        
-        price_marker_count = sum(1 for listing in enriched_listings if listing.get('price_vs_market', 0) != 0)
-        logger.info(f"Successfully enriched {price_marker_count}/{len(enriched_listings)} listings with price markers")
-        
-        logger.info(f"\n{'='*60}\nCACHE TEST RESULTS\n{'='*60}")
-        logger.info(f"All listings cache: {'SUCCESS' if len(all_listings) > 0 else 'FAILED'}")
-        logger.info(f"Retail prices cache: {'SUCCESS' if len(retail_prices) > 0 else 'FAILED'}")
-        logger.info(f"Price marker application: {'SUCCESS' if price_marker_count > 0 else 'FAILED'}")
-        
-    else:
-        logger.error(f"Cache files not found for {make} {model}")
 
 
 def get_make_from_model(model_name: str) -> Optional[str]:
@@ -1482,7 +1731,6 @@ def main():
     parser.add_argument("--model", type=str, help="Test specific model (e.g., '3 series', 'fiesta', 'yaris')")
     parser.add_argument("--weekly-training", action="store_true", help="Force weekly retail scraping and model training")
     parser.add_argument("--no-proxy", action="store_true", help="Disable proxy rotation")
-    parser.add_argument("--cache-test", action="store_true", help="Test cache functionality only")
     
     args = parser.parse_args()
     
@@ -1494,46 +1742,33 @@ def main():
     retail_config = get_weekly_retail_config()
     verify_ssl = retail_config.get('verify_ssl', False)
     
-    print("\n" + "=" * 60)
-    print("                    🚗 CAR DEALER BOT")
-    print("=" * 60)
-    print()
-    print(f"🔍 Mode: {get_execution_mode()}")
+    from src.output_manager import get_output_manager
+    output_manager = get_output_manager()
+    output_manager.startup_banner()
+    output_manager.info(f"Mode: {get_execution_mode()}")
     
-    # Handle cache testing
-    if args.cache_test:
-        if args.model:
-            make = get_make_from_model(args.model)
-            if make:
-                test_cache_functionality(make, args.model)
-            else:
-                print(f"❌ Unknown model: {args.model}")
-        else:
-            print("❌ Cache test requires --model argument")
-        return
     
     # Handle safe individual model testing
     if args.test and args.model:
         make = get_make_from_model(args.model)
         if not make:
-            print(f"❌ Unknown model: {args.model}")
-            print("Available models:")
+            output_manager.error(f"Unknown model: {args.model}")
+            output_manager.info("Available models:")
             for make_name, models in TARGET_VEHICLES_BY_MAKE.items():
-                print(f"  {make_name}: {', '.join(models)}")
+                output_manager.info(f"  {make_name}: {', '.join(models)}")
             return
-        
-        print(f"🧪 SAFE TEST MODE: Processing {make.upper()} {args.model.upper()} individually")
-        print("   - No impact on weekly schedule")
-        print("   - Uses individual ML approach")  
-        print("   - Minimal data usage")
-        print()
+
+        output_manager.info(f"🧪 SAFE TEST MODE: Processing {make.upper()} {args.model.upper()} individually")
+        output_manager.info("   - No impact on weekly schedule")
+        output_manager.info("   - Uses individual ML approach")
+        output_manager.info("   - Minimal data usage")
         
         _process_individual_model(make, args.model, max_pages=None, verify_ssl=verify_ssl)
         return
     
     # Handle weekly training override
     if args.weekly_training:
-        print("🔄 Forcing weekly retail scraping and model training...")
+        output_manager.info("🔄 Forcing weekly retail scraping and model training...")
         from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
         success = run_weekly_training(
             max_pages_per_model=None,  # Always use maximum pages
@@ -1541,11 +1776,11 @@ def main():
             use_proxy=not args.no_proxy,
             test_mode=(get_execution_mode() == "test")
         )
-        
+
         if success:
-            print("✅ Weekly training completed successfully")
+            output_manager.success("Weekly training completed successfully")
         else:
-            print("❌ Weekly training failed")
+            output_manager.error("Weekly training failed")
         return
     
     # Default targets - sample from configuration for production runs
@@ -1555,62 +1790,59 @@ def main():
         {"make": "ford", "model": "fiesta"},
     ]
     
-    print(f"🎯 Processing {len(targets)} make/model combinations")
-    print()
-    
+    output_manager.info(f"🎯 Processing {len(targets)} make/model combinations")
+
     # Check universal model status
     if is_universal_model_available():
-        print("✅ Universal model available - ready for efficient daily operations")
+        output_manager.success("Universal model available - ready for efficient daily operations")
     elif is_retail_scraping_due():
-        print("🔄 Universal model not available and weekly retail scraping is due")
-        print("   This run will include full retail price scraping and model training")
+        output_manager.info("🔄 Universal model not available and weekly retail scraping is due")
+        output_manager.info("   This run will include full retail price scraping and model training")
     else:
-        print("⚠️ Universal model not available but retail scraping not due")
-        print("   Consider running with --weekly-training to create universal model")
-    print()
+        output_manager.warning("Universal model not available but retail scraping not due")
+        output_manager.info("   Consider running with --weekly-training to create universal model")
     
     # Process all targets
     for i, target in enumerate(targets):
         try:
-            print(f"\n{'='*60}")
-            print(f"PROCESSING {i+1}/{len(targets)}: {target['make'].upper()} {target['model'].upper()}")
-            print(f"{'='*60}")
-            
+            output_manager.info(f"\n{'='*60}")
+            output_manager.info(f"PROCESSING {i+1}/{len(targets)}: {target['make'].upper()} {target['model'].upper()}")
+            output_manager.info(f"{'='*60}")
+
             process_car_model(
-                make=target["make"], 
-                model=target["model"], 
+                make=target["make"],
+                model=target["model"],
                 max_pages=None,  # Always use maximum pages
                 verify_ssl=verify_ssl
             )
-            
+
         except Exception as e:
-            print(f"❌ Error processing {target['make']} {target['model']}: {e}")
+            output_manager.error(f"Error processing {target['make']} {target['model']}: {e}")
             logger.error(f"Error processing {target['make']} {target['model']}: {e}")
             continue
     
-    print(f"\n{'='*60}")
-    print(f"PROCESSING COMPLETE")
-    print(f"{'='*60}")
-    print(f"✅ Successfully processed {len(targets)} make/model combinations")
-    
+    output_manager.info(f"\n{'='*60}")
+    output_manager.info(f"PROCESSING COMPLETE")
+    output_manager.info(f"{'='*60}")
+    output_manager.success(f"Successfully processed {len(targets)} make/model combinations")
+
     # Show schedule status
     from config.config import get_schedule_status
     schedule_status = get_schedule_status()
-    print(f"\n📅 Schedule Status:")
-    print(f"   Weekly retail scraping due: {'Yes' if schedule_status['is_due'] else 'No'}")
+    output_manager.info(f"\n📅 Schedule Status:")
+    output_manager.info(f"   Weekly retail scraping due: {'Yes' if schedule_status['is_due'] else 'No'}")
     if schedule_status['days_since_last']:
-        print(f"   Days since last scraping: {schedule_status['days_since_last']}")
+        output_manager.info(f"   Days since last scraping: {schedule_status['days_since_last']}")
     if schedule_status['next_scheduled']:
-        print(f"   Next scheduled: {schedule_status['next_scheduled']}")
+        output_manager.info(f"   Next scheduled: {schedule_status['next_scheduled']}")
     
-    print()
 
 
 # ────────────────────────────────────────────────────────────
 # Compatibility functions for scraper.py integration
 # ────────────────────────────────────────────────────────────
 
-def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, verbose: bool = False) -> None:
+def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, verbose: bool = False, training_mode: bool = False, export_predictions: bool = False) -> None:
     """
     Enhanced analysis using universal ML model for vehicle profit prediction.
     Compatible with the existing scraper.py interface.
@@ -1629,186 +1861,169 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
             'min_cash_margin': 800,
         }
     
-    if not listings:
-        return
-    
-    if verbose:
-        logger.info(f"🔧 Starting enhanced analysis of {len(listings)} listings using universal model...")
-    
-    # Check if weekly training is due (unlikely during scraper runs, but check anyway)
-    if is_retail_scraping_due():
-        if verbose:
-            logger.info("⚠️ Weekly retail scraping is due - consider running weekly training")
-    
-    # Step 1: Load universal model
-    if not is_universal_model_available():
-        if verbose:
-            logger.warning("⚠️ No universal model available - falling back to individual processing")
-        _enhanced_analyse_listings_individual(listings, cfg, verbose)
-        return
-    
-    if not load_universal_model():
-        if verbose:
-            logger.error("❌ Failed to load universal model - falling back to individual processing")
-        _enhanced_analyse_listings_individual(listings, cfg, verbose)
-        return
-    
-    # Step 2: Filter for private listings (universal model works on private listings)
-    private_listings = [listing for listing in listings if listing.get('seller_type', '').upper() == 'PRIVATE']
-    
-    if not private_listings:
-        if verbose:
-            logger.info("No private listings found for universal model analysis")
-        return
-    
-    if verbose:
-        logger.info(f"📋 Analyzing {len(private_listings)} private listings with universal model")
-    
-    # Step 3: Use universal model to predict market values
-    try:
-        predictions_df = predict_with_universal_model(private_listings)
-        
-        if predictions_df.empty:
-            if verbose:
-                logger.error("❌ Universal model prediction failed")
-            return
-        
-        # Step 4: Convert predictions back to listings format and add analysis results
-        analyzed_listings = []
-        
-        for i, (_, prediction) in enumerate(predictions_df.iterrows()):
-            if i < len(private_listings):
-                original_listing = private_listings[i].copy()
-                
-                # Add universal ML prediction results
-                predicted_margin = prediction.get('predicted_profit_margin', 0)
-                predicted_market_value = prediction.get('predicted_market_value', 0)
-                potential_profit = prediction.get('potential_profit', 0)
-                
-                original_listing['enhanced_retail_estimate'] = predicted_market_value
-                original_listing['enhanced_gross_margin_pct'] = predicted_margin
-                original_listing['enhanced_gross_cash_profit'] = potential_profit
-                
-                # Determine rating based on universal ML prediction
-                if predicted_margin >= cfg['excellent_margin_pct']:
-                    rating = "Excellent Deal"
-                elif predicted_margin >= cfg['good_margin_pct']:
-                    rating = "Good Deal"
-                elif predicted_margin >= cfg['negotiation_margin_pct'] and potential_profit >= cfg['min_cash_margin']:
-                    rating = "Negotiation Target"
+    # Always show ML model processing section with clean format, even if no listings
+    from src.output_manager import get_output_manager
+    output_manager = get_output_manager()
+    output_manager.ml_model_processing_start()
+
+    # Check if retail scraping is needed (either due by schedule OR missing market_value data)
+    listings_need_market_value = listings and len([l for l in listings if l.get('market_value') and l.get('market_value') > 0]) == 0
+    retail_scraping_needed = is_retail_scraping_due() or listings_need_market_value
+
+    if retail_scraping_needed:
+        if is_retail_scraping_due():
+            output_manager.ml_model_status("⚠️ Weekly retail scraping is due - triggering automatic retail price scraping")
+        else:
+            output_manager.ml_model_status("⚠️ ML training needs market_value data - triggering automatic retail price scraping")
+
+        # Auto-trigger retail price scraping
+        try:
+            from services.price_scraper import batch_scrape_price_markers
+
+            # Get listings for retail price scraping
+            retail_listings = [listing for listing in listings if listing.get('url')]
+            if retail_listings:
+                output_manager._print("")
+
+                # Scrape retail prices using batch scraper
+                retail_data = batch_scrape_price_markers(
+                    [listing['url'] for listing in retail_listings],
+                    headless=True,
+                    test_mode=False
+                )
+
+                if retail_data:
+                    # batch_scrape_price_markers returns a dict: {url: result_data}
+                    # Transform it to the format expected by the code
+                    url_to_market_value = {url: result.get('market_value')
+                                         for url, result in retail_data.items()
+                                         if result.get('market_value') and result.get('market_value') > 0}
+
+                    # Update listings with market values
+                    updated_count = 0
+                    for listing in listings:
+                        url = listing.get('url', '')
+                        if url in url_to_market_value:
+                            listing['market_value'] = url_to_market_value[url]
+                            updated_count += 1
+
+                    output_manager.ml_model_status(f"Updated {updated_count} listings with market values")
+
+                    # Update retail scraping schedule
+                    from config.config import mark_retail_scraping_complete
+                    mark_retail_scraping_complete(success=True, total_vehicles=updated_count, notes="Auto-triggered during ML analysis")
                 else:
-                    rating = "Reject"
-                
-                original_listing['enhanced_rating'] = rating
-                original_listing['analysis_method'] = 'universal_ml_model'
-                
-                # Only keep profitable deals
-                if rating != "Reject":
-                    analyzed_listings.append(original_listing)
-        
-        # Replace original listings with analyzed results
-        listings.clear()
-        listings.extend(analyzed_listings)
-        
-        if verbose:
-            logger.info(f"✅ Universal ML analysis complete: {len(analyzed_listings)} profitable deals found")
-        
-        # Save data in test mode when called from scraper
-        global EXECUTION_MODE
-        if EXECUTION_MODE == "test" and analyzed_listings:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            deals_file = os.path.join(DATA_OUTPUTS_PATH, f"{timestamp}_scraper_universal_analyzed_deals.json")
-            try:
-                import json
-                with open(deals_file, 'w') as f:
-                    json.dump(analyzed_listings, f, indent=2, default=str)
-                logger.info(f"💾 Saved {len(analyzed_listings)} universal analyzed deals to {deals_file}")
-            except Exception as e:
-                logger.error(f"❌ Error saving universal analyzed deals: {e}")
-    
-    except Exception as e:
-        if verbose:
-            logger.error(f"Error in universal model analysis: {e}")
-        # Fall back to individual processing
-        _enhanced_analyse_listings_individual(listings, cfg, verbose)
+                    output_manager.ml_model_status("❌ Retail scraping failed - no data retrieved")
+            else:
+                output_manager.ml_model_status("❌ No listings with URLs available for retail scraping")
+        except Exception as e:
+            output_manager.ml_model_status(f"❌ Retail scraping error: {str(e)}")
+            logger.error(f"Auto retail scraping failed: {e}")
+
+    if not listings:
+        output_manager.ml_model_status("No listings provided for analysis")
+        output_manager.ml_model_complete()
+
+        # Always show analysis section even with no listings
+        output_manager.analysis_start()
+        output_manager.analysis_results(
+            avg_market_value=0,
+            confidence=0.0,
+            sample_size=0,
+            deals_found=0
+        )
+        return
+
+    output_manager.ml_model_status("Using individual model processing (fallback mode)")
+
+    # Use individual model processing directly (no universal model)
+    _enhanced_analyse_listings_individual(listings, cfg, verbose, output_manager, training_mode, export_predictions)
+
+    # Analysis results will be shown by the individual processing function
+    return
 
 
-def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: Dict, verbose: bool = False) -> None:
+def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: Dict, verbose: bool = False, output_manager = None, training_mode: bool = False, export_predictions: bool = False) -> None:
     """
     Fallback enhanced analysis using individual make/model processing.
     This is the original enhanced_analyse_listings logic.
     """
-    if verbose:
-        logger.info(f"🔧 Using individual model analysis for {len(listings)} listings...")
-    
-    # Step 1: Enrich with retail price markers first
-    if verbose:
-        logger.info(f"📊 Enriching with retail price markers...")
-    
-    # Extract make/model from first listing for context
-    make = listings[0].get('make', '').lower() if listings else None
-    model = listings[0].get('model', '').lower() if listings else None
-    
-    # Call retail price enrichment
-    enriched_listings = enrich_with_price_markers(listings, make=make, model=model)
-    
-    # Update the original listings with enriched data
-    listings.clear()
-    listings.extend(enriched_listings)
-    
-    if verbose:
-        logger.info(f"✅ Price marker enrichment complete")
-    
-    # Step 2: Continue with ML analysis
-    if verbose:
-        logger.info(f"🤖 Starting individual ML analysis...")
-    
+    if output_manager is None:
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+
+    # Step 1: Only enrich with retail price markers if in training mode
+    if training_mode:
+        # Extract make/model from first listing for context
+        make = listings[0].get('make', '').lower() if listings else None
+        model = listings[0].get('model', '').lower() if listings else None
+
+        # Call retail price enrichment (use quiet_mode to suppress verbose banners)
+        enriched_listings = enrich_with_price_markers(listings, make=make, model=model, quiet_mode=True)
+
+        # Update the original listings with enriched data
+        listings.clear()
+        listings.extend(enriched_listings)
+    # In normal (non-training) mode, skip retail price scraping entirely
+
     # Group listings by make/model for efficient processing
     grouped_listings = {}
     for listing in listings:
         make = listing.get('make', '').lower()
         model = listing.get('model', '').lower()
         key = f"{make}_{model}"
-        
+
         if key not in grouped_listings:
             grouped_listings[key] = []
         grouped_listings[key].append(listing)
-    
+
     analyzed_listings = []
-    
+    all_predictions = []  # Store all predictions for analysis stats
+
     # Process each make/model group
     for group_key, group_listings in grouped_listings.items():
         if len(group_listings) < 5:
             continue  # Skip groups with insufficient data
-        
+
         make, model = group_key.split('_', 1)
-        
+
         try:
             # Separate dealer and private listings
             dealer_listings = [l for l in group_listings if l.get('seller_type', '').upper() in ['TRADE', 'DEALER']]
             private_listings = [l for l in group_listings if l.get('seller_type', '').upper() == 'PRIVATE']
-            
+
             if len(dealer_listings) < 3 or len(private_listings) < 1:
                 continue
-            
+
             # Convert to the format expected by ML functions
             dealer_data = []
+            enriched_dealer_count = 0
             for listing in dealer_listings:
+                market_value = listing.get('market_value', 0)
+                price_vs_market = listing.get('price_vs_market', 0)
+
+                # Count as enriched if we have either direct market_value or price_vs_market
+                if market_value != 0 or price_vs_market != 0:
+                    enriched_dealer_count += 1
+
                 dealer_data.append({
                     'make': listing.get('make', ''),
                     'model': listing.get('model', ''),
                     'year': listing.get('year', 2015),
                     'asking_price': listing.get('asking_price', listing.get('price', 0)),
                     'mileage': listing.get('mileage', 50000),
+                    'market_value': market_value,  # Direct market value (most accurate)
+                    'price_vs_market': price_vs_market,  # Fallback for training
                     'seller_type': 'Dealer',
                     'url': listing.get('url', ''),
                     'spec': listing.get('spec', '')
                 })
-            
+
             # Load or train model for this make/model
             xgb_model, scaler = load_or_train_model(make, model, dealer_data)
-            
+
             if xgb_model is None or scaler is None:
+                output_manager.ml_model_status(f"❌ Unable to create model for {make} {model} - skipping analysis")
                 continue
             
             # Predict on private listings
@@ -1825,51 +2040,114 @@ def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: D
                     'spec': listing.get('spec', '')
                 })
             
+            # Analyze private listings with trained model
             predictions_df = predict_market_values(private_data, xgb_model, scaler)
-            
+
             # Convert predictions back to listings format and add analysis results
+            processed_count = 0
+            reject_count = 0
             for i, (_, prediction) in enumerate(predictions_df.iterrows()):
                 if i < len(private_listings):
                     original_listing = private_listings[i]
-                    
+                    processed_count += 1
+
                     # Add ML prediction results
                     predicted_margin = prediction.get('predicted_profit_margin', 0)
                     predicted_market_value = prediction.get('predicted_market_value', 0)
                     potential_profit = prediction.get('potential_profit', 0)
-                    
-                    original_listing['enhanced_retail_estimate'] = predicted_market_value
-                    original_listing['enhanced_gross_margin_pct'] = predicted_margin
-                    original_listing['enhanced_gross_cash_profit'] = potential_profit
-                    
+
+
+                    original_listing['predicted_market_value'] = predicted_market_value
+                    original_listing['predicted_margin_pct'] = predicted_margin
+                    original_listing['predicted_profit'] = potential_profit
+
                     # Determine rating based on ML prediction
-                    if predicted_margin >= cfg['excellent_margin_pct']:
-                        rating = "Excellent Deal"
-                    elif predicted_margin >= cfg['good_margin_pct']:
-                        rating = "Good Deal"
-                    elif predicted_margin >= cfg['negotiation_margin_pct'] and potential_profit >= cfg['min_cash_margin']:
-                        rating = "Negotiation Target"
+                    # ALL deals must have minimum £800 profit to be kept
+                    if potential_profit >= cfg['min_cash_margin']:
+                        if predicted_margin >= cfg['excellent_margin_pct']:
+                            rating = "Excellent Deal"
+                        elif predicted_margin >= cfg['good_margin_pct']:
+                            rating = "Good Deal"
+                        elif predicted_margin >= cfg['negotiation_margin_pct']:
+                            rating = "Negotiation Target"
+                        else:
+                            rating = "Reject"
+                            reject_count += 1
                     else:
                         rating = "Reject"
-                    
+                        reject_count += 1
+
                     original_listing['enhanced_rating'] = rating
-                    original_listing['analysis_method'] = 'individual_ml_xgboost'
-                    
-                    # Only keep profitable deals
+
+
+                    # Store all predictions for analysis stats (regardless of profitability)
+                    all_predictions.append({
+                        'url': original_listing.get('url', ''),
+                        'make': original_listing.get('make', ''),
+                        'model': original_listing.get('model', ''),
+                        'year': original_listing.get('year', ''),
+                        'mileage': original_listing.get('mileage', 0),
+                        'asking_price': round(original_listing.get('asking_price', 0), 2),
+                        'predicted_market_value': round(predicted_market_value, 2),
+                        'predicted_margin': round(predicted_margin, 4),  # Keep 4dp for margin as it's a percentage
+                        'potential_profit': round(potential_profit, 2),
+                        'rating': rating
+                    })
+
+                    # Only keep profitable deals for final output
                     if rating != "Reject":
                         analyzed_listings.append(original_listing)
+
         
         except Exception as e:
-            logger.error(f"Error analyzing {make} {model}: {e}")
+            output_manager.ml_model_status(f"❌ Error analyzing {make} {model}: {e}")
             continue
-    
+
+    # Complete the ML model processing section
+    output_manager.ml_model_complete()
+
     # Replace original listings with analyzed results
     listings.clear()
     listings.extend(analyzed_listings)
-    
-    if verbose:
-        logger.info(f"✅ Individual ML analysis complete: {len(analyzed_listings)} profitable deals found")
-    
-    # Save data in test mode when called from scraper
+
+    # Show analysis results based on ALL predictions (not just profitable ones)
+    if all_predictions:
+        # Calculate stats from all predictions made
+        total_predictions = len(all_predictions)
+        avg_market_value = sum(p['predicted_market_value'] for p in all_predictions) / total_predictions
+        avg_margin = sum(p['predicted_margin'] for p in all_predictions) / total_predictions
+        deals_found = len(analyzed_listings)  # Number of deals that passed profitability filter
+
+
+        # Show analysis results using OutputManager
+        output_manager.analysis_results(
+            avg_market_value=avg_market_value,
+            confidence=0.85,  # Default confidence - could be improved with model metrics
+            sample_size=total_predictions,
+            deals_found=deals_found
+        )
+    else:
+        # Show analysis results even if no predictions made
+        output_manager.analysis_results(
+            avg_market_value=0,
+            confidence=0.0,
+            sample_size=0,
+            deals_found=0
+        )
+
+    # Export predictions if requested
+    if export_predictions and all_predictions:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        predictions_file = os.path.join(DATA_OUTPUTS_PATH, f"{timestamp}_ml_predictions_export.json")
+        try:
+            import json
+            with open(predictions_file, 'w') as f:
+                json.dump(all_predictions, f, indent=2, default=str)
+            output_manager.ml_model_status(f"📊 Exported {len(all_predictions)} ML predictions to {predictions_file}")
+        except Exception as e:
+            output_manager.ml_model_status(f"❌ Error exporting predictions: {e}")
+
+    # Save data in test mode when called from scraper (keep logger for file operations)
     global EXECUTION_MODE
     if EXECUTION_MODE == "test" and analyzed_listings:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

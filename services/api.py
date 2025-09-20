@@ -71,7 +71,7 @@ async def get_deals():
                 "image_url": vehicle.get("image_url", ""),
                 "image_url_2": vehicle.get("image_url_2", ""),
                 "comparisonUrl": vehicle.get("comparisonUrl", ""),
-                "dateAdded": vehicle.get("date_added", vehicle.get("dateAdded", datetime.now().strftime("%Y-%m-%d"))),
+                "dateAdded": vehicle.get("created_at", datetime.now().strftime("%Y-%m-%d")),
                 "deal_id": vehicle.get("deal_id", ""),  # DynamoDB specific field
                 "created_at": vehicle.get("created_at", ""),  # DynamoDB specific field
             }
@@ -152,7 +152,7 @@ async def get_top_deals(limit: int = 50, min_profit: float = 0.0):
                 "image_url": vehicle.get("image_url", ""),
                 "image_url_2": vehicle.get("image_url_2", ""),
                 "comparisonUrl": vehicle.get("comparisonUrl", ""),
-                "dateAdded": vehicle.get("date_added", datetime.now().strftime("%Y-%m-%d")),
+                "dateAdded": vehicle.get("created_at", datetime.now().strftime("%Y-%m-%d")),
                 "deal_id": vehicle.get("deal_id", ""),
                 "created_at": vehicle.get("created_at", ""),
             }

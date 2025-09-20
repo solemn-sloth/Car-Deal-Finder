@@ -480,12 +480,12 @@ class ProxyManager:
     are stored as .txt files in the archive folder.
     """
 
-    def __init__(self, config_path: str = "config/proxies.json", archive_path: str = "archive"):
+    def __init__(self, config_path: str = None, archive_path: str = "archive"):
         """
-        Initialize the proxy manager.
+        Initialize the proxy manager (API-only mode).
 
         Args:
-            config_path: Path to the proxy configuration file
+            config_path: Deprecated - no longer used (API-only mode)
             archive_path: Path to store blacklisted proxy information
         """
         self.proxies = []
@@ -497,6 +497,7 @@ class ProxyManager:
         # Webshare API cache variables
         self._api_proxies = []
         self._last_api_refresh = None
+        self._proxy_refresh_message = ""
 
         self._load_config()
 
@@ -504,7 +505,7 @@ class ProxyManager:
         os.makedirs(self.archive_path, exist_ok=True)
 
     def _load_config(self) -> None:
-        """Load proxy configuration, trying API first, then JSON fallback."""
+        """Load proxy configuration from Webshare API only."""
         # Try to load from Webshare API first
         if self._should_refresh_api_cache():
             if self._fetch_webshare_proxies():
@@ -512,14 +513,18 @@ class ProxyManager:
                 self.proxies = self._api_proxies
                 self._load_proxy_settings()
                 return
+            else:
+                logger.warning("Failed to fetch proxies from Webshare API, proceeding without proxies")
         elif self._api_proxies:
             # Use cached API proxies if available and not expired
             self.proxies = self._api_proxies
             self._load_proxy_settings()
             return
 
-        # Fallback to JSON file
-        self._load_from_json_file()
+        # No API proxies available - proceed without proxies
+        logger.info("No API proxies available, proceeding without proxy rotation")
+        self.proxies = []
+        self.settings = {}
 
     def _should_refresh_api_cache(self) -> bool:
         """Check if API cache should be refreshed (>24h old or never fetched)."""
@@ -579,14 +584,19 @@ class ProxyManager:
                     self._api_proxies.append(formatted_proxy)
 
                 self._last_api_refresh = time.time()
-                print(f"✅ Proxies refreshed ({len(self._api_proxies)} available)")
+                # Store proxy refresh message for later display
+                self._proxy_refresh_message = f"✅ Proxies refreshed ({len(self._api_proxies)} available)"
                 return True
             else:
-                print(f"❌ API failed (HTTP {response.status_code}), using cached proxies")
+                from src.output_manager import get_output_manager
+                output_manager = get_output_manager()
+                output_manager.warning(f"API failed (HTTP {response.status_code}), using cached proxies")
                 return False
 
         except Exception as e:
-            print(f"❌ API failed ({str(e)}), using cached proxies")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.warning(f"API failed ({str(e)}), using cached proxies")
             return False
 
     def _load_proxy_settings(self) -> None:
@@ -615,7 +625,9 @@ class ProxyManager:
                 random.shuffle(self.proxies)
 
         except Exception as e:
-            print(f"Error loading proxy config: {e}")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.error(f"Error loading proxy config: {e}")
             self.proxies = []
 
     def is_blacklisted(self, ip: str) -> bool:
@@ -675,15 +687,15 @@ class ProxyManager:
                 auth = f"{proxy['username']}:{proxy['password']}" if 'username' in proxy and 'password' in proxy else ""
                 proxy_url = f"http://{auth}@{ip}:{proxy['port']}" if auth else f"http://{ip}:{proxy['port']}"
 
-                # Print the single line status message
-                print(f"🌐 IP: {ip}:{proxy['port']} ({proxy.get('country', 'Unknown')}) ✅")
-                print()
+                # Silent proxy operations for cleaner output
 
                 return proxy_url
 
             attempts += 1
 
-        print("All proxies are blacklisted. Proceeding without proxy.")
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.warning("All proxies are blacklisted. Proceeding without proxy.")
         return None
 
     def get_proxy_for_worker(self, worker_id: int) -> Optional[str]:
@@ -707,7 +719,9 @@ class ProxyManager:
         ]
 
         if not available_proxies:
-            print("All proxies are blacklisted. Proceeding without proxy.")
+            from src.output_manager import get_output_manager
+            output_manager = get_output_manager()
+            output_manager.warning("All proxies are blacklisted. Proceeding without proxy.")
             return None
 
         # Assign proxy based on worker_id for consistency
@@ -775,7 +789,9 @@ class ProxyManager:
         proxy_url = f"http://{auth}@{ip}:{proxy['port']}" if auth else f"http://{ip}:{proxy['port']}"
 
         # Print the single line status message
-        print(f"IP Initialized: {ip}:{proxy['port']} ({proxy.get('country', 'Unknown')}) | Status: Working")
+        from src.output_manager import get_output_manager
+        output_manager = get_output_manager()
+        output_manager.info(f"IP Initialized: {ip}:{proxy['port']} ({proxy.get('country', 'Unknown')}) | Status: Working")
 
         return proxy_url
 
@@ -857,7 +873,11 @@ class StealthOrchestrator:
                 logger.debug(f"Worker {worker_id} detected as blocked, pausing")
 
         # Mark the task as done in the queue
-        self.work_queue.task_done()
+        try:
+            self.work_queue.task_done()
+        except ValueError:
+            # Handle race condition where task_done() is called too many times
+            logger.debug(f"task_done() called too many times - worker {worker_id} likely processed same task")
 
     def _get_result_status(self, result: Dict[str, Any]) -> str:
         """Get status indicator for result - can be overridden by subclasses."""

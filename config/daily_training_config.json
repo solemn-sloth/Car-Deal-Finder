@@ -3,8 +3,8 @@
   "models_per_day": 10,
   "cycle_days": 14,
   "min_samples_per_model": 50,
-  "current_cycle_day": 1,
-  "last_run_date": null,
+  "current_cycle_day": 7,
+  "last_run_date": "2025-09-20T12:45:52.303478",
   "total_models": 139,
   "notes": "Each cycle day trains ~10 models. 139 total models across 14 days = ~9.9 models per day"
 }

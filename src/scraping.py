@@ -19,6 +19,7 @@ from services.stealth_orchestrator import ProxyManager
 from services.network_requests import NetworkDataAdapter
 from src.analyser import enhanced_analyse_listings, enhanced_keep_listing
 from config.config import TARGET_VEHICLES_BY_MAKE, VEHICLE_SEARCH_CRITERIA
+from src.output_manager import get_output_manager
 
 # Pipeline imports
 from src.storage import SupabaseStorage
@@ -71,28 +72,23 @@ class SmartGroupingOrchestrator:
     4. Maintains all existing deal notification logic
     """
     
-    def __init__(self, connection_pool_size=10):
-        # Initialize proxy manager for Cloudflare bypass
-        proxy_manager = None
+    def __init__(self, connection_pool_size=10, export_predictions=False):
+        # Initialize proxy manager for Cloudflare bypass (API-only mode)
+        self.proxy_manager = None
+        self._proxy_status_message = ""
         try:
-            import os
-            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config/proxies.json')
-            if os.path.exists(config_path):
-                proxy_manager = ProxyManager(config_path=config_path)
-                print("🔄 Proxy rotation enabled")
+            self.proxy_manager = ProxyManager()
+            if self.proxy_manager.proxies:
+                self._proxy_status_message = ""  # Silent proxy operations
             else:
-                print("⚠️ No proxy config found, proceeding without proxies")
+                self._proxy_status_message = ""  # Silent proxy operations
         except Exception as e:
-            print(f"⚠️ Failed to initialize proxy rotation: {e}")
-            proxy_manager = None
-        
-        # Initialize API client with connection pooling and proxy support
-        self.api_client = AutoTraderAPIClient(
-            connection_pool_size=connection_pool_size, 
-            optimize_connection=True, 
-            verify_ssl=False,
-            proxy_manager=proxy_manager
-        )
+            self._proxy_status_message = ""  # Silent proxy operations
+            self.proxy_manager = None
+
+        # Store connection pool size for worker initialization
+        self.connection_pool_size = connection_pool_size
+        self.export_predictions = export_predictions
         self.session_data = {
             'start_time': datetime.now().isoformat(),
             'groups_processed': 0,
@@ -166,23 +162,60 @@ class SmartGroupingOrchestrator:
         errors = []
         
         try:
-            # Make ONE API call for this make/model
-            print(f"🔍 Scraping {group.make} {group.model} from {group.search_criteria['year_from']}-{group.search_criteria['year_to']}, max_mileage: {group.search_criteria['maximum_mileage']}")
-            
-            raw_vehicles = self.api_client.get_all_cars_with_mileage_splitting(
+            # Get output manager for final result display
+            output_manager = get_output_manager()
+
+            # Use multi-worker API scraping with proper anti-detection
+            import time
+
+            # Track scraping time
+            scraping_start_time = time.time()
+
+            # Create temporary API client to use the multi-worker scraping method
+            from services.network_requests import AutoTraderAPIClient
+            temp_client = AutoTraderAPIClient(
+                connection_pool_size=self.connection_pool_size,
+                optimize_connection=True,
+                verify_ssl=False,
+                proxy_manager=self.proxy_manager
+            )
+
+            # Create progress callback for API scraping
+            def api_progress_callback(completed, total_tasks, status=None):
+                if completed == 0:
+                    output_manager.progress_update(0, total_tasks, "api_scraping", 0, "Starting...")
+                else:
+                    elapsed_time = time.time() - scraping_start_time
+                    speed = (completed * 60 / elapsed_time) if elapsed_time > 0 else 0
+                    # Note: completed is now total listings scraped, not tasks completed
+                    # We can't reliably calculate ETA since we don't know total expected listings
+                    # Just show current progress with rate
+                    output_manager.progress_update(completed, total_tasks, "api_scraping", speed, "")
+
+            # Use parallel multi-worker scraping for better anti-detection
+            raw_vehicles = temp_client.get_all_cars_parallel(
                 make=group.make,
                 model=group.model,
                 postcode="HP13 7LW",  # From original config
                 min_year=group.search_criteria['year_from'],
                 max_year=group.search_criteria['year_to'],
                 max_mileage=group.search_criteria['maximum_mileage'],
-                max_pages=None  # No limit - scrape all available cars
+                max_pages=None,  # No limit - scrape all available cars
+                use_parallel=True,  # Force parallel mode
+                test_mode=False,  # Enable proper delays
+                progress_callback=api_progress_callback
             )
-            print(f"📊 Found {len(raw_vehicles)} vehicles")
+
+            # Calculate elapsed time
+            scraping_elapsed = time.time() - scraping_start_time
+
+            # Show final scraping result (replaces progress)
+            output_manager = get_output_manager()
+            output_manager.scraping_result(len(raw_vehicles), elapsed_time=scraping_elapsed)
             
             self.session_data['total_api_calls'] += 1
             self.session_data['total_vehicles_scraped'] += len(raw_vehicles)
-            
+
             if not raw_vehicles:
                 return ScrapingResult(
                     group=group,
@@ -192,7 +225,7 @@ class SmartGroupingOrchestrator:
                     quality_deals=0,
                     errors=["No vehicles found"]
                 )
-            
+
             # Convert API data to analyzer format using adapter
             try:
                 converted_vehicles = NetworkDataAdapter.convert_vehicle_list(raw_vehicles)
@@ -200,7 +233,8 @@ class SmartGroupingOrchestrator:
                 # Check for missing fuel type data
                 missing_fuel_data = sum(1 for v in converted_vehicles if not v.get('fuel_type'))
                 if missing_fuel_data > 0:
-                    print(f"   ⚠️ {missing_fuel_data} vehicles missing fuel type data (fallback applied)")
+                    output_manager = get_output_manager()
+                    output_manager.scraping_result(len(raw_vehicles), missing_fuel_data)
                 
                 if not converted_vehicles:
                     return ScrapingResult(
@@ -226,8 +260,8 @@ class SmartGroupingOrchestrator:
                 )
             
             # Process each configuration variant against the shared vehicle data
-            print(f"\n📊 Analyzing data...")
-            
+            output_manager = get_output_manager()
+
             processed_variants = {}  # Initialize as empty dict
             total_quality_deals = 0
             
@@ -240,10 +274,21 @@ class SmartGroupingOrchestrator:
                 try:
                     # Filter converted vehicles for this variant
                     variant_vehicles = self._filter_vehicles_for_variant(converted_vehicles, config)
-                    
+
                     if variant_vehicles:
                         # Analyze vehicles using enhanced analyzer
-                        enhanced_analyse_listings(variant_vehicles, verbose=False)
+                        try:
+                            enhanced_analyse_listings(variant_vehicles, verbose=False, training_mode=False, export_predictions=self.export_predictions)
+                            output_manager.ml_model_status(f"Analysis complete for {config['variant_name']}")
+                        except Exception as ml_error:
+                            error_msg = f"ML analysis failed for {config['variant_name']}: {str(ml_error)}"
+                            errors.append(error_msg)
+                            output_manager.ml_model_error(f"Analysis failed for {config['variant_name']}: {str(ml_error)}")
+                            # Log the error but continue processing
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.error(f"Enhanced analysis failed: {ml_error}")
+                            # Continue with unanalyzed vehicles (they won't have ML predictions but can still be processed)
                         
                         # Filter for quality deals after analysis
                         quality_deals = [deal for deal in variant_vehicles if enhanced_keep_listing(deal)]
@@ -274,20 +319,21 @@ class SmartGroupingOrchestrator:
                     error_msg = f"Error processing variant {config['variant_name']}: {str(e)}"
                     errors.append(error_msg)
             
+            # Complete ML processing section
+            output_manager.ml_model_complete()
+
             # Print market value summary
             avg_market_value = 0
             if count_with_market_value > 0:
                 avg_market_value = total_market_value / count_with_market_value
-            
-            print(f"   • Average market value: £{int(avg_market_value):,}")
-            print(f"   • Confidence: R²={confidence:.3f}")
-            print(f"   • Sample size: {len(raw_vehicles)} comparable vehicles")
-            print(f"   • Deals found: {total_quality_deals} quality deals")
+
+            # Analysis results will be displayed by the analyser, not here
             
             self.session_data['total_quality_deals'] += total_quality_deals
             
-            print(f"\n✅ {group.make} {group.model} complete")
-            print("------------------------------------------------------------")
+            output_manager = get_output_manager()
+            output_manager.group_complete(group.make, group.model)
+            # Separator handled by group_complete method
             
             return ScrapingResult(
                 group=group,
@@ -426,9 +472,7 @@ class SmartGroupingOrchestrator:
         Returns:
             Dict: Complete session results
         """
-        print("\n============================================================")
-        print("                  🚀 Starting Car Dealer Bot")
-        print("============================================================")
+        # Startup banner is now handled by run_smart_grouped_scraping function
         
         # Apply make/model filtering first
         filtered_groups = self.groups
@@ -439,12 +483,14 @@ class SmartGroupingOrchestrator:
                 model_matches = not filter_model or group.model.lower() == filter_model.lower()
                 if make_matches and model_matches:
                     filtered_groups.append(group)
-            
+
             if not filtered_groups:
-                print(f"❌ No groups found matching make='{filter_make}' model='{filter_model}'")
+                output_manager = get_output_manager()
+                output_manager.error(f"No groups found matching make='{filter_make}' model='{filter_model}'")
                 return {'session_summary': {}, 'results': []}
             else:
-                print(f"🎯 Filtering to {len(filtered_groups)} group(s): {filter_make} {filter_model}")
+                output_manager = get_output_manager()
+                output_manager.group_filtering(len(filtered_groups), filter_make, filter_model)
         
         # Apply max_groups limit
         if max_groups:
@@ -456,7 +502,8 @@ class SmartGroupingOrchestrator:
         start_time = time.time()
         
         for i, group in enumerate(groups_to_process, 1):
-            print(f"\n[{i}/{len(groups_to_process)}] Processing {group}")
+            output_manager = get_output_manager()
+            output_manager.group_start(i, len(groups_to_process), group.make, group.model)
             
             # Brief delay between group processing
             if i > 1:
@@ -484,19 +531,23 @@ class SmartGroupingOrchestrator:
 # Main Pipeline Orchestration
 # ────────────────────────────────────────────────────────────
 
-def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool_size=10, filter_make=None, filter_model=None):
+def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool_size=10, filter_make=None, filter_model=None, export_predictions=False):
     """
     Run the complete smart grouped scraping and notification pipeline.
-    
+
     Args:
         max_groups: Limit number of groups (for testing)
         test_mode: If True, don't send notifications
         connection_pool_size: Size of the connection pool for HTTP requests (default: 10)
+        filter_make: Filter to specific make (e.g., "BMW")
+        filter_model: Filter to specific model (e.g., "3 Series")
+        export_predictions: Export ML predictions to JSON with features
     """
+    # Startup banner is now handled by main.py automation orchestrator
     # Initialize orchestrator silently with connection pooling
-    orchestrator = SmartGroupingOrchestrator(connection_pool_size=connection_pool_size)
+    orchestrator = SmartGroupingOrchestrator(connection_pool_size=connection_pool_size, export_predictions=export_predictions)
     start_time = datetime.now()
-    
+
     try:
         results = orchestrator.run_full_orchestration(max_groups=max_groups, filter_make=filter_make, filter_model=filter_model)
         
@@ -505,35 +556,71 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
         for result in results['results']:
             for variant_key, variant_data in result.processed_variants.items():
                 all_quality_deals.extend(variant_data['quality_deals'])
-        
-        # Save comprehensive JSON archive for analytics (quietly)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        archive_data = {
-            'scrape_metadata': {
-                'timestamp': timestamp,
-                'datetime': datetime.now().isoformat(),
-                'groups_processed': results['session_data']['groups_processed'],
-                'total_api_calls': results['session_data']['total_api_calls'],
-                'api_call_savings': results['session_data']['api_call_savings'],
-                'total_vehicles_scraped': results['session_data']['total_vehicles_scraped'],
-                'quality_deals_found': len(all_quality_deals),
-                'runtime_minutes': (datetime.now() - start_time).total_seconds() / 60
-            },
-            'deals': all_quality_deals,
-            'session_summary': results['session_data']
-        }
-        
-        # Create archive directory if it doesn't exist
-        archive_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'archive')
-        os.makedirs(archive_dir, exist_ok=True)
-        
-        # Save complete archive
-        archive_file = os.path.join(archive_dir, f'car_deals_archive_{timestamp}.json')
-        with open(archive_file, 'w') as f:
-            json.dump(archive_data, f, indent=2, default=str)
-        
-        # Calculate file size
-        file_size_mb = os.path.getsize(archive_file) / (1024 * 1024)
+
+        # Clean deals for archive storage
+        def clean_deals_for_archive(deals):
+            """Clean and format deals for archive storage with proper field naming and formatting."""
+            clean_deals = []
+            for deal in deals:
+                # Only keep essential fields with proper naming and formatting
+                clean_deal = {
+                    'deal_id': deal.get('deal_id', ''),
+                    'url': deal.get('url', ''),
+                    'price': deal.get('price', ''),
+                    'year': deal.get('year', ''),
+                    'mileage': deal.get('mileage', ''),
+                    'make': deal.get('make', ''),
+                    'model': deal.get('model', ''),
+                    'seller_type': deal.get('seller_type', ''),
+                    'location': deal.get('location', ''),
+                    'engine_size': deal.get('engine_size', ''),
+                    'fuel_type': deal.get('fuel_type', ''),
+                    'transmission': deal.get('transmission', ''),
+                    'doors': deal.get('doors', ''),
+                    'image_url': deal.get('image_url', ''),
+                    'image_url_2': deal.get('image_url_2', ''),
+                    # Renamed and formatted prediction fields
+                    'predicted_market_value': round(deal.get('enhanced_retail_estimate', 0), 2),
+                    'predicted_margin_pct': round(deal.get('enhanced_gross_margin_pct', 0), 3),
+                    'predicted_profit': round(deal.get('enhanced_gross_cash_profit', 0), 0),
+                    'enhanced_rating': deal.get('enhanced_rating', '')
+                }
+                clean_deals.append(clean_deal)
+            return clean_deals
+
+        # Only save archive if there are actual quality deals found
+        if all_quality_deals:
+            # Clean deals for archive storage
+            clean_archive_deals = clean_deals_for_archive(all_quality_deals)
+
+            # Save comprehensive JSON archive for analytics (quietly)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            archive_data = {
+                'scrape_metadata': {
+                    'timestamp': timestamp,
+                    'datetime': datetime.now().isoformat(),
+                    'groups_processed': results['session_data']['groups_processed'],
+                    'total_api_calls': results['session_data']['total_api_calls'],
+                    'api_call_savings': results['session_data']['api_call_savings'],
+                    'total_vehicles_scraped': results['session_data']['total_vehicles_scraped'],
+                    'quality_deals_found': len(all_quality_deals),
+                    'runtime_minutes': (datetime.now() - start_time).total_seconds() / 60
+                },
+                'deals': clean_archive_deals,
+                'session_summary': results['session_data']
+            }
+
+            # Create archive/outputs directory if it doesn't exist
+            archive_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'archive', 'outputs')
+            os.makedirs(archive_dir, exist_ok=True)
+
+            # Save complete archive
+            archive_file = os.path.join(archive_dir, f'car_deals_archive_{timestamp}.json')
+            with open(archive_file, 'w') as f:
+                json.dump(archive_data, f, indent=2, default=str)
+
+            # Calculate file size
+            file_size_mb = os.path.getsize(archive_file) / (1024 * 1024)
 
         if all_quality_deals:
             # Store deals to database
@@ -546,7 +633,6 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
                 for deal in all_quality_deals:
                     # Remove temporary analysis fields before saving to database
                     deal_copy = deal.copy()
-                    deal_copy.pop('analysis_method', None)
                     deal_copy.pop('attention_grabber', None)
                     
                     # Remove fields that should not be sent to database
@@ -560,12 +646,11 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
                     
                     # Only keep fields that are present in the database schema
                     allowed_fields = [
-                        'id', 'deal_id', 'created_at', 'updated_at', 'make', 'model', 'year', 'spec', 
-                        'engine_size', 'fuel_type', 'transmission', 'body_type', 'doors', 'mileage', 
-                        'price_numeric', 'enhanced_retail_estimate', 'enhanced_net_sale_price', 
-                        'enhanced_gross_cash_profit', 'enhanced_gross_margin_pct', 'enhanced_rating', 
-                        'spec_analysis', 'location', 'distance', 'seller_type', 'title', 'subtitle', 
-                        'full_title', 'url', 'image_url', 'image_url_2', 'date_added', 'test_record'
+                        'id', 'deal_id', 'created_at', 'updated_at', 'make', 'model', 'year', 'spec',
+                        'engine_size', 'fuel_type', 'transmission', 'doors', 'mileage', 'price_numeric',
+                        'predicted_market_value', 'predicted_margin_pct', 'predicted_profit',
+                        'enhanced_rating', 'location', 'seller_type', 'url', 'image_url', 'image_url_2',
+                        'test_record'
                     ]
                     
                     # Remove all fields that aren't in the allowed list
@@ -573,19 +658,9 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
                     for field in fields_to_remove:
                         deal_copy.pop(field, None)
                     
-                    # Clean distance field to extract only numeric value
-                    if 'distance' in deal_copy and deal_copy['distance']:
-                        distance_str = str(deal_copy['distance'])
-                        import re
-                        numeric_match = re.search(r'(\d+(?:\.\d+)?)', distance_str)
-                        if numeric_match:
-                            deal_copy['distance'] = float(numeric_match.group(1))
-                        else:
-                            deal_copy['distance'] = None
                     
                     # Clean price-related fields to extract only numeric values
-                    price_fields = ['price', 'price_numeric', 'enhanced_retail_estimate', 
-                                   'enhanced_net_sale_price', 'enhanced_gross_cash_profit']
+                    price_fields = ['price', 'price_numeric', 'predicted_market_value', 'predicted_profit']
                     for field in price_fields:
                         if field in deal_copy and deal_copy[field]:
                             price_str = str(deal_copy[field])
@@ -600,11 +675,11 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
                                 deal_copy[field] = None
                     
                     # Clean percentage field (margin) - keep as decimal
-                    if 'enhanced_gross_margin_pct' in deal_copy and deal_copy['enhanced_gross_margin_pct']:
+                    if 'predicted_margin_pct' in deal_copy and deal_copy['predicted_margin_pct']:
                         try:
-                            deal_copy['enhanced_gross_margin_pct'] = float(deal_copy['enhanced_gross_margin_pct'])
+                            deal_copy['predicted_margin_pct'] = float(deal_copy['predicted_margin_pct'])
                         except (ValueError, TypeError):
-                            deal_copy['enhanced_gross_margin_pct'] = None
+                            deal_copy['predicted_margin_pct'] = None
                             
                     # Check if doors is an integer
                     if 'doors' in deal_copy and deal_copy['doors'] is not None:
@@ -633,7 +708,8 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
                 sync_result = storage.sync_deals_intelligently(clean_deals)
                 
                 if not sync_result['success']:
-                    print(f"Sync failed: {sync_result.get('error', 'Unknown error')}")
+                    output_manager = get_output_manager()
+                    output_manager.error(f"Sync failed: {sync_result.get('error', 'Unknown error')}")
                     return results
                 
                 # Send notifications
@@ -641,11 +717,13 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
                 notification_result = notification_pipeline.process_daily_notifications()
                 
                 if not notification_result.get('success'):
-                    print(f"Notification issue: {notification_result.get('error', 'Unknown')}")
+                    output_manager = get_output_manager()
+                    output_manager.warning(f"Notification issue: {notification_result.get('error', 'Unknown')}")
             else:
-                print(f"TEST MODE: Would have stored {len(all_quality_deals)} deals")
+                output_manager = get_output_manager()
+                output_manager.info(f"TEST MODE: Would have stored {len(all_quality_deals)} deals")
         else:
-            print("No quality deals found this session")
+            output_manager = get_output_manager()
         
         # Final summary
         end_time = datetime.now()
@@ -679,34 +757,26 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
             db_removed = sync_result.get('removed_count', 0)
             db_total = sync_result.get('total_deals', 0)
         
-        # Print formatted summary
-        print("\n" + "=" * 60)
-        print(f"{'📈 Session Summary':^60}")
-        print("=" * 60)
-        print()
-        print("🎯 Deal Discovery")
-        print(f"   • Quality deals found: {quality_deal_count}")
-        print(f"   • Total vehicles analyzed: {total_vehicles}")
-        print(f"   • Deal percentage rate: {deal_percentage:.1f}%")
-        print()
-        print("🔄 Database Sync")
-        print(f"   • New deals added: {db_added}")
-        print(f"   • Existing deals updated: {db_updated}")
-        print(f"   • Sold/missing removed: {db_removed}")
-        print(f"   • Total active deals: {db_total}")
-        print()
-        print("📧 Notifications")
-        print(f"   • Status: {notification_status}")
-        print()
-        print("-" * 60)
-        print(f"⏱️  Session completed in {duration:.1f} minutes")
-        print(f"✅ All tasks completed successfully")
-        print("=" * 60)
+        # Print formatted summary using centralized output
+        output_manager = get_output_manager()
+        summary_data = {
+            'quality_deals': quality_deal_count,
+            'total_vehicles': total_vehicles,
+            'deal_percentage': deal_percentage,
+            'db_added': db_added,
+            'db_updated': db_updated,
+            'db_removed': db_removed,
+            'db_total': db_total,
+            'notification_status': notification_status,
+            'duration_minutes': duration
+        }
+        output_manager.session_summary(summary_data)
         
         return results
         
     except Exception as e:
-        print(f"❌ Orchestration failed: {e}")
+        output_manager = get_output_manager()
+        output_manager.error(f"Orchestration failed: {e}")
         raise
 
 
@@ -737,7 +807,8 @@ def main():
         )
         
     except Exception as e:
-        print(f"❌ Failed: {e}")
+        output_manager = get_output_manager()
+        output_manager.error(f"Failed: {e}")
         exit(1)
 
 
@@ -747,50 +818,66 @@ def main():
 
 def test_configuration_grouping():
     """Test the configuration grouping logic"""
-    print("🧪 Testing Configuration Grouping...")
+    # Test function - suppress output
+    pass
     
     orchestrator = SmartGroupingOrchestrator()
     
-    print(f"✅ Created {len(orchestrator.groups)} groups")
-    print(f"💡 API call savings: {orchestrator.session_data['api_call_savings']}")
+    # Test function - suppress output
+    pass
+    # Test function - suppress output
+    pass
     
     # Show sample groups
-    print(f"\n📋 Sample groups:")
+    # Test function - suppress output
+    pass
     for i, group in enumerate(orchestrator.groups[:5]):
-        print(f"  {i+1}. {group}")
+        # Test function - suppress output
+        pass
         for variant in group.specific_configs[:2]:  # Show first 2 variants
-            print(f"     → {variant['variant_name']}")
+            # Test function - suppress output
+            pass
     
     return orchestrator
 
 
 def test_single_group_scraping():
     """Test scraping a single group to validate the process"""
-    print("🧪 Testing Single Group Scraping...")
+    # Test function - suppress output
+    pass
     
     orchestrator = SmartGroupingOrchestrator()
     
     # Pick a reliable group for testing (Toyota)
     toyota_groups = [g for g in orchestrator.groups if g.make == 'Toyota']
     if not toyota_groups:
-        print("❌ No Toyota groups found for testing")
+        # Test function - suppress output
+        pass
         return None
     
     test_group = toyota_groups[0]  # Test first Toyota model
-    print(f"🎯 Testing group: {test_group}")
+    # Test function - suppress output
+    pass
     
     result = orchestrator.scrape_group(test_group)
     
-    print(f"\n📊 Test Results:")
-    print(f"   • Raw vehicles: {len(result.raw_vehicles)}")
-    print(f"   • Processed variants: {len(result.processed_variants)}")
-    print(f"   • Quality deals: {result.quality_deals}")
-    print(f"   • Errors: {len(result.errors)}")
+    # Test function - suppress output
+    pass
+    # Test function - suppress output
+    pass
+    # Test function - suppress output
+    pass
+    # Test function - suppress output
+    pass
+    # Test function - suppress output
+    pass
     
     if result.errors:
-        print(f"❌ Errors encountered:")
+        # Test function - suppress output
+        pass
         for error in result.errors:
-            print(f"     • {error}")
+            # Test function - suppress output
+            pass
     
     return result
 

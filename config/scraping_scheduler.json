@@ -1,6 +1,67 @@
 {
-  "last_retail_scraping": null,
+  "last_retail_scraping": "2025-09-20T22:07:32.546815",
   "last_scraping_success": true,
-  "scraping_history": [],
+  "scraping_history": [
+    {
+      "timestamp": "2025-09-20T21:51:56.700628",
+      "success": true,
+      "total_vehicles": 1645,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T21:56:57.018788",
+      "success": true,
+      "total_vehicles": 687,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T21:59:27.296387",
+      "success": true,
+      "total_vehicles": 489,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:00:51.417265",
+      "success": true,
+      "total_vehicles": 597,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:01:38.192491",
+      "success": true,
+      "total_vehicles": 238,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:03:12.624342",
+      "success": true,
+      "total_vehicles": 706,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:04:25.381718",
+      "success": true,
+      "total_vehicles": 550,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:05:53.021702",
+      "success": true,
+      "total_vehicles": 644,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:06:52.667440",
+      "success": true,
+      "total_vehicles": 365,
+      "notes": "Auto-triggered during ML analysis"
+    },
+    {
+      "timestamp": "2025-09-20T22:07:32.546831",
+      "success": true,
+      "total_vehicles": 204,
+      "notes": "Auto-triggered during ML analysis"
+    }
+  ],
   "created_at": "2025-09-16T23:07:46.706426"
 }
