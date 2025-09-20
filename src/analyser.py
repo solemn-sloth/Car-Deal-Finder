@@ -27,9 +27,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from playwright.sync_api import sync_playwright
 
-# Import encodings for make/model one-hot encoding
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from config.encodings import MAKE_ENCODING, MODEL_ENCODING
+# Note: Legacy one-hot encoding removed - now using model-specific approach
 
 # Set up proper import paths (only need to do this once)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -574,8 +572,8 @@ def filter_listings_by_seller_type(listings: List[Dict[str, Any]], seller_type: 
     return filtered
 
 
-# Feature Engineering Functions
-def prepare_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
+# Legacy prepare_features function removed - now using model_specific_trainer.prepare_model_specific_features
+# (The entire function with one-hot encoding has been replaced by model-specific approach)
     """Extract and prepare features for model training or prediction
     
     Args:
@@ -584,8 +582,9 @@ def prepare_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
     Returns:
         DataFrame with prepared features
     """
-    # Convert listings to DataFrame
-    df = pd.DataFrame(listings)
+    # LEGACY FUNCTION - DISABLED
+    # This function has been replaced by model_specific_trainer.prepare_model_specific_features
+    raise NotImplementedError("Legacy prepare_features function disabled. Use model_specific_trainer.prepare_model_specific_features instead.")
     
     # Ensure required columns exist
     required_columns = ['asking_price', 'mileage', 'year']
@@ -1569,33 +1568,6 @@ def process_car_model(make: str, model: str = None, max_pages: int = None, verif
     _process_individual_model(make, model, max_pages, verify_ssl)
     return
     
-    # Step 1: Scrape private listings only (minimal proxy usage for daily operations)
-    logger.info(f"🔍 Scraping private listings for {make} {model or 'All Models'} (universal model mode)")
-    all_listings = scrape_listings(make, model, max_pages, verify_ssl=verify_ssl, use_proxy=True)
-    
-    if not all_listings:
-        from src.output_manager import get_output_manager
-        output_manager = get_output_manager()
-        output_manager.error(f"No listings found for {make} {model or 'All Models'}")
-        return
-    
-    # Step 2: Filter for private listings only (dealers already processed in weekly training)
-    private_listings = filter_listings_by_seller_type(all_listings, "Private")
-    
-    if len(private_listings) == 0:
-        logger.warning(f"No private listings found for {make} {model or 'all'}")
-        return
-    
-    logger.info(f"📋 Found {len(private_listings)} private listings for analysis")
-    
-    # Step 3: Use universal model to predict market values
-    logger.info(f"🤖 Predicting market values using universal model...")
-    predictions_df = predict_with_universal_model(private_listings)
-    
-    if predictions_df.empty:
-        logger.error("❌ Universal model prediction failed")
-        return
-    
     # Step 4: Filter for profitable deals
     profitable_deals = filter_profitable_deals(predictions_df)
     
@@ -1766,22 +1738,11 @@ def main():
         _process_individual_model(make, args.model, max_pages=None, verify_ssl=verify_ssl)
         return
     
-    # Handle weekly training override
+    # Handle weekly training override (legacy flag - now uses daily model-specific training)
     if args.weekly_training:
-        output_manager.info("🔄 Forcing weekly retail scraping and model training...")
-        from services.ML_trainer import run_weekly_training  # Import locally to avoid circular import
-        success = run_weekly_training(
-            max_pages_per_model=None,  # Always use maximum pages
-            verify_ssl=verify_ssl,
-            use_proxy=not args.no_proxy,
-            test_mode=(get_execution_mode() == "test")
-        )
-
-        if success:
-            output_manager.success("Weekly training completed successfully")
-        else:
-            output_manager.error("Weekly training failed")
-        return
+        output_manager.warning("⚠️  --weekly-training flag is deprecated")
+        output_manager.info("🔄 Using daily model-specific training instead (more accurate)")
+        # Continue with normal processing using model-specific approach
     
     # Default targets - sample from configuration for production runs
     targets = [
@@ -1792,15 +1753,8 @@ def main():
     
     output_manager.info(f"🎯 Processing {len(targets)} make/model combinations")
 
-    # Check universal model status
-    if is_universal_model_available():
-        output_manager.success("Universal model available - ready for efficient daily operations")
-    elif is_retail_scraping_due():
-        output_manager.info("🔄 Universal model not available and weekly retail scraping is due")
-        output_manager.info("   This run will include full retail price scraping and model training")
-    else:
-        output_manager.warning("Universal model not available but retail scraping not due")
-        output_manager.info("   Consider running with --weekly-training to create universal model")
+    # Using individual model-specific training approach
+    output_manager.info("🤖 Using model-specific ML training approach for optimal accuracy")
     
     # Process all targets
     for i, target in enumerate(targets):

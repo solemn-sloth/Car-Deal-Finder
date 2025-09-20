@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
 # Add project root to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.config import get_xgboost_params
+# Note: get_xgboost_params removed from config - using direct parameters
 from src.output_manager import get_output_manager
 
 logger = logging.getLogger(__name__)
@@ -330,8 +330,17 @@ def train_model_specific(make: str, model: str, dealer_listings: List[Dict[str, 
         dtrain = xgb.DMatrix(X_train_scaled, label=y_train)
         dtest = xgb.DMatrix(X_test_scaled, label=y_test)
 
-        # Get XGBoost parameters
-        xgb_params = get_xgboost_params()
+        # XGBoost parameters for model-specific training
+        xgb_params = {
+            'objective': 'reg:squarederror',
+            'eval_metric': 'rmse',
+            'max_depth': 4,
+            'eta': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'min_child_weight': 1,
+            'seed': 42
+        }
 
         # Train model
         model_xgb = xgb.train(

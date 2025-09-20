@@ -39,29 +39,7 @@ WEEKLY_RETAIL_SCRAPING = {
 }
 
 # Universal ML Model Configuration  
-UNIVERSAL_ML_CONFIG = {
-    'model_path': os.getenv('UNIVERSAL_MODEL_PATH', None),  # Custom model path (None = auto)
-    'min_training_samples': int(os.getenv('MIN_TRAINING_SAMPLES', '50')),  # Minimum samples to train universal model
-    'feature_columns': [  # Fixed feature set for universal model
-        'asking_price', 'mileage', 'age', 'make_encoded', 'model_encoded',
-        'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric'
-    ],
-    'xgboost_params': {  # XGBoost parameters for universal model
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse',
-        'max_depth': int(os.getenv('XGBOOST_MAX_DEPTH', '6')),
-        'eta': float(os.getenv('XGBOOST_ETA', '0.1')),
-        'subsample': float(os.getenv('XGBOOST_SUBSAMPLE', '0.8')),
-        'colsample_bytree': float(os.getenv('XGBOOST_COLSAMPLE_BYTREE', '0.8')),
-        'min_child_weight': int(os.getenv('XGBOOST_MIN_CHILD_WEIGHT', '3')),
-        'seed': 42
-    },
-    'training_params': {
-        'num_boost_round': int(os.getenv('XGBOOST_ROUNDS', '150')),
-        'early_stopping_rounds': int(os.getenv('XGBOOST_EARLY_STOPPING', '15')),
-        'test_size': float(os.getenv('ML_TEST_SIZE', '0.2'))
-    }
-}
+# Note: Universal ML Model Configuration removed - now using model-specific training
 
 # AutoTrader URL Generation Configuration
 AUTOTRADER_BASE_URL = "https://www.autotrader.co.uk/car-search"
@@ -401,23 +379,7 @@ def should_use_proxy_for_retail():
     """
     return WEEKLY_RETAIL_SCRAPING['use_proxy']
 
-def get_xgboost_params():
-    """
-    Get XGBoost parameters for universal model training.
-    
-    Returns:
-        dict: XGBoost parameters
-    """
-    return UNIVERSAL_ML_CONFIG['xgboost_params'].copy()
-
-def get_training_params():
-    """
-    Get training parameters for universal model.
-    
-    Returns:
-        dict: Training parameters
-    """
-    return UNIVERSAL_ML_CONFIG['training_params'].copy()
+# Note: get_xgboost_params() and get_training_params() removed - universal model config no longer exists
 
 def get_min_training_samples():
     """
