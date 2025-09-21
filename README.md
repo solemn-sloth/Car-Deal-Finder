@@ -90,11 +90,21 @@ FEATURE_COLUMNS = [
 ]
 ```
 
-### XGBoost Configuration
-- **Regression**: Predicts market values using squared error loss
-- **Parameters**: Learning rate 0.1, max depth 6, subsample 0.8
-- **Training**: Minimum 50 samples required per model
-- **Validation**: Uses early stopping to prevent overfitting
+### Dynamic XGBoost Configuration
+The system uses **adaptive parameters** based on dataset size for optimal performance:
+
+| Dataset Size | Max Depth | Learning Rate | Trees | Alpha | Early Stop | Validation |
+|--------------|-----------|---------------|-------|-------|------------|------------|
+| **TINY** (<100) | 2 | 0.3 | 50 | 0 | None | No split |
+| **SMALL** (100-500) | 4 | 0.1 | 150 | 0 | 30 | 15% test |
+| **MEDIUM** (500-2000) | 6 | 0.05 | 500 | 0.1 | 75 | 20% test |
+| **LARGE** (2000+) | 7 | 0.03 | 1000 | 0.5 | 100 | 20% test |
+
+**Key Features:**
+- **Adaptive Complexity**: Parameters scale with data availability
+- **Conservative L1**: Light feature selection only for large datasets
+- **Performance Optimized**: `tree_method='hist'` for 2-3x faster training
+- **No Feature Risk**: Preserves all 7 domain-critical features (fuel, transmission, etc.)
 
 ### Daily Training Groups
 Training groups are defined in `config/config.py` with balanced model distribution across 14 days.

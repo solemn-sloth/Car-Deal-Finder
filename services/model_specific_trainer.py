@@ -33,6 +33,120 @@ from src.output_manager import get_output_manager
 logger = logging.getLogger(__name__)
 
 
+def get_dynamic_xgb_params(sample_count: int) -> dict:
+    """
+    Select XGBoost parameters based on dataset size for optimal performance.
+
+    Args:
+        sample_count: Number of training samples available
+
+    Returns:
+        Dictionary of XGBoost parameters optimized for the dataset size
+    """
+    if sample_count < 100:
+        # Tiny datasets: Ultra-conservative settings, no feature elimination risk
+        return {
+            'objective': 'reg:squarederror',
+            'eval_metric': 'rmse',
+            'max_depth': 2,  # Even shallower trees for sparse data
+            'eta': 0.3,  # Higher learning rate for fewer trees
+            'subsample': 1.0,  # Use all available data
+            'colsample_bytree': 0.8,
+            'min_child_weight': 10,  # Strict leaf requirements
+            'reg_lambda': 10,  # Heavy L2 regularization
+            'gamma': 2,  # High minimum loss reduction to split
+            'tree_method': 'hist',  # Faster training algorithm
+            'seed': 42
+        }
+    elif sample_count < 500:
+        # Small datasets: Conservative parameters, no feature elimination risk
+        return {
+            'objective': 'reg:squarederror',
+            'eval_metric': 'rmse',
+            'max_depth': 4,
+            'eta': 0.1,
+            'subsample': 0.9,
+            'colsample_bytree': 0.8,
+            'min_child_weight': 5,
+            'reg_lambda': 5,
+            'gamma': 0.5,  # Moderate minimum loss reduction to split
+            'tree_method': 'hist',  # Faster training algorithm
+            'seed': 42
+        }
+    elif sample_count < 2000:
+        # Medium datasets: Balanced complexity with very conservative feature selection
+        return {
+            'objective': 'reg:squarederror',
+            'eval_metric': 'rmse',
+            'max_depth': 6,
+            'eta': 0.05,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'min_child_weight': 3,
+            'reg_lambda': 1,
+            'alpha': 0.1,  # Very light L1 regularization, unlikely to eliminate features
+            'gamma': 0.1,  # Light minimum loss reduction to split
+            'tree_method': 'hist',  # Faster training algorithm
+            'seed': 42
+        }
+    else:
+        # Large datasets: Optimized complexity with performance enhancements
+        return {
+            'objective': 'reg:squarederror',
+            'eval_metric': 'rmse',
+            'max_depth': 7,  # Reduced depth to prevent overfitting
+            'eta': 0.03,  # Lower learning rate for more trees
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'min_child_weight': 1,
+            'reg_lambda': 0.5,
+            'alpha': 0.5,  # Light L1 regularization for feature selection
+            'gamma': 0,  # No minimum loss reduction (default XGBoost behavior)
+            'tree_method': 'hist',  # Faster training algorithm
+            'seed': 42
+        }
+
+
+def get_dynamic_training_params(sample_count: int) -> dict:
+    """
+    Select training parameters based on dataset size.
+
+    Args:
+        sample_count: Number of training samples available
+
+    Returns:
+        Dictionary of training parameters (num_boost_round, early_stopping, test_size)
+    """
+    if sample_count < 100:
+        # Tiny datasets: Few trees, use all data for training, no early stopping
+        return {
+            'num_boost_round': 50,
+            'early_stopping_rounds': None,  # Let all trees build for maximum learning
+            'test_size': None  # Skip validation split for tiny datasets
+        }
+    elif sample_count < 500:
+        # Small datasets: Moderate tree count with optimized validation split
+        return {
+            'num_boost_round': 150,  # 50% increase - allows more complexity if needed
+            'early_stopping_rounds': 30,
+            'test_size': 0.15  # Reduced validation split for more training data
+        }
+    elif sample_count < 2000:
+        # Medium datasets: High tree count with increased patience
+        return {
+            'num_boost_round': 500,  # 150% increase - supports complex car models
+            'early_stopping_rounds': 75,  # More patience for lower learning rate
+            'test_size': 0.2
+        }
+    else:
+        # Large datasets: Maximum trees with high patience for very low learning rate
+        return {
+            'num_boost_round': 1000,  # 100% increase - full complexity for popular models
+            'early_stopping_rounds': 100,  # Maximum patience for lr=0.03
+            'test_size': 0.2
+        }
+
+
 def prepare_model_specific_features(listings: List[Dict[str, Any]]) -> pd.DataFrame:
     """
     Prepare features for model-specific training (no one-hot encoding needed).
@@ -313,53 +427,93 @@ def train_model_specific(make: str, model: str, dealer_listings: List[Dict[str, 
             logger.error(f"Error in feature extraction: {e}")
             raise
 
-        logger.info(f"Training with {len(X)} samples and {len(feature_columns)} features")
+        sample_count = len(X)
+        logger.info(f"Training with {sample_count} samples and {len(feature_columns)} features")
 
-        # Split data
-        test_size = min(0.2, max(0.1, 20/len(X)))  # Adaptive test size
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42
-        )
+        # Get dynamic parameters based on dataset size
+        xgb_params = get_dynamic_xgb_params(sample_count)
+        training_params = get_dynamic_training_params(sample_count)
 
-        # Scale features
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        # Log which parameter configuration was selected
+        if sample_count < 100:
+            config_type = "TINY"
+        elif sample_count < 500:
+            config_type = "SMALL"
+        elif sample_count < 2000:
+            config_type = "MEDIUM"
+        else:
+            config_type = "LARGE"
 
-        # Create DMatrix for XGBoost
-        dtrain = xgb.DMatrix(X_train_scaled, label=y_train)
-        dtest = xgb.DMatrix(X_test_scaled, label=y_test)
+        logger.info(f"Using {config_type} dataset configuration for {make} {model} ({sample_count} samples)")
+        logger.debug(f"XGBoost params: max_depth={xgb_params['max_depth']}, eta={xgb_params['eta']}, alpha={xgb_params.get('alpha', 0)}, gamma={xgb_params['gamma']}, n_estimators={training_params['num_boost_round']}")
 
-        # XGBoost parameters for model-specific training
-        xgb_params = {
-            'objective': 'reg:squarederror',
-            'eval_metric': 'rmse',
-            'max_depth': 4,
-            'eta': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 1,
-            'seed': 42
-        }
+        # Handle data splitting based on dataset size
+        if training_params['test_size'] is None:
+            # For tiny datasets, use all data for training (no validation split)
+            X_train_scaled = StandardScaler().fit_transform(X)
+            y_train = y
+            scaler = StandardScaler().fit(X)
+
+            # Create DMatrix for XGBoost
+            dtrain = xgb.DMatrix(X_train_scaled, label=y_train)
+            dtest = None  # No test set for tiny datasets
+
+            logger.info(f"Using all {sample_count} samples for training (no validation split)")
+        else:
+            # Standard train/test split for larger datasets
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=training_params['test_size'], random_state=42
+            )
+
+            # Scale features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+
+            # Create DMatrix for XGBoost
+            dtrain = xgb.DMatrix(X_train_scaled, label=y_train)
+            dtest = xgb.DMatrix(X_test_scaled, label=y_test)
+
+            logger.info(f"Using {len(X_train)} samples for training, {len(X_test)} for validation")
 
         # Train model with warning suppression
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*UBJSON format.*")
-            model_xgb = xgb.train(
-                xgb_params,
-                dtrain,
-                num_boost_round=100,
-                evals=[(dtrain, 'train'), (dtest, 'test')],
-                verbose_eval=False,
-                early_stopping_rounds=10
-            )
+
+            # Prepare evaluation list based on whether we have test data
+            evals = [(dtrain, 'train')]
+            if dtest is not None:
+                evals.append((dtest, 'test'))
+
+            # Prepare XGBoost training arguments
+            train_kwargs = {
+                'params': xgb_params,
+                'dtrain': dtrain,
+                'num_boost_round': training_params['num_boost_round'],
+                'evals': evals,
+                'verbose_eval': False
+            }
+
+            # Only add early_stopping_rounds if it's not None
+            if training_params['early_stopping_rounds'] is not None:
+                train_kwargs['early_stopping_rounds'] = training_params['early_stopping_rounds']
+
+            model_xgb = xgb.train(**train_kwargs)
 
         # Evaluate model
-        y_pred = model_xgb.predict(dtest)
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-
-        logger.info(f"Model performance for {make} {model}: MSE={mse:.2f}, R²={r2:.3f}")
+        if dtest is not None:
+            # Standard evaluation with test set
+            y_pred = model_xgb.predict(dtest)
+            mse = mean_squared_error(y_test, y_pred)
+            r2 = r2_score(y_test, y_pred)
+            logger.info(f"Model performance for {make} {model}: MSE={mse:.2f}, R²={r2:.3f}")
+        else:
+            # For tiny datasets, evaluate on training data (just for logging)
+            y_pred_train = model_xgb.predict(dtrain)
+            mse_train = mean_squared_error(y_train, y_pred_train)
+            r2_train = r2_score(y_train, y_pred_train)
+            logger.info(f"Model performance for {make} {model} (training set): MSE={mse_train:.2f}, R²={r2_train:.3f}")
+            logger.warning(f"No validation split used for tiny dataset ({sample_count} samples)")
 
         # Save model and scaler
         success = save_model_specific(make, model, model_xgb, scaler)
@@ -465,8 +619,43 @@ def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], O
 
 
 if __name__ == "__main__":
-    # Test with some sample data
-    logging.basicConfig(level=logging.ERROR)
+    # Test dynamic parameter selection logic
+    logging.basicConfig(level=logging.INFO)
+
+    print("Testing Dynamic Parameter Selection:")
+    print("=" * 50)
+
+    # Test different dataset sizes
+    test_sizes = [50, 150, 800, 2500]
+
+    for size in test_sizes:
+        xgb_params = get_dynamic_xgb_params(size)
+        training_params = get_dynamic_training_params(size)
+
+        if size < 100:
+            config_type = "TINY"
+        elif size < 500:
+            config_type = "SMALL"
+        elif size < 2000:
+            config_type = "MEDIUM"
+        else:
+            config_type = "LARGE"
+
+        print(f"\n{config_type} dataset ({size} samples):")
+        print(f"  max_depth: {xgb_params['max_depth']}")
+        print(f"  learning_rate: {xgb_params['eta']}")
+        print(f"  n_estimators: {training_params['num_boost_round']}")
+        print(f"  min_child_weight: {xgb_params['min_child_weight']}")
+        print(f"  reg_lambda: {xgb_params['reg_lambda']}")
+        print(f"  alpha: {xgb_params.get('alpha', 0)}")  # Handle missing alpha
+        print(f"  gamma: {xgb_params['gamma']}")
+        print(f"  tree_method: {xgb_params['tree_method']}")
+        print(f"  test_size: {training_params['test_size']}")
+        print(f"  early_stopping: {training_params['early_stopping_rounds']}")
+
+    # Test with sample data (minimal test)
+    print("\n" + "=" * 50)
+    print("Testing with sample BMW 3 Series data...")
 
     sample_listings = [
         {
@@ -476,7 +665,7 @@ if __name__ == "__main__":
             'mileage': 50000,
             'year': 2020,
             'spec': '2.0 TDI Sport',
-            'price_vs_market': -1000
+            'market_value': 26000  # Added market_value for training
         }
     ]
 
