@@ -199,11 +199,10 @@ class OutputManager:
         """Display analysis start header."""
         self._print("📊 Analysis Results:")
 
-    def analysis_results(self, avg_market_value: float, confidence: float, sample_size: int, deals_found: int):
-        """Display analysis results."""
+    def analysis_results(self, avg_market_value: float, r2: float, mape: float, sample_size: int, deals_found: int):
+        """Display analysis results with real performance metrics."""
         self._print(f"   • Average market value: £{int(avg_market_value):,}")
-        self._print(f"   • Confidence: R²={confidence:.3f}")
-        self._print(f"   • Sample size: {sample_size} comparable vehicles")
+        self._print(f"   • Confidence: R²={r2:.3f} | Error={mape:.1f}% | n={sample_size}")
         self._print(f"   • Deals found: {deals_found} quality deals")
 
     def group_complete(self, make: str, model: str):

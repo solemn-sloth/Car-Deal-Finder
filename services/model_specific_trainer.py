@@ -33,6 +33,26 @@ from src.output_manager import get_output_manager
 logger = logging.getLogger(__name__)
 
 
+def calculate_mape(y_true, y_pred):
+    """
+    Calculate Mean Absolute Percentage Error (MAPE).
+
+    Args:
+        y_true: Actual values
+        y_pred: Predicted values
+
+    Returns:
+        MAPE as percentage (e.g., 8.5 means 8.5% average error)
+    """
+    errors = []
+    for actual, predicted in zip(y_true, y_pred):
+        if actual > 0:  # Avoid division by zero
+            error_pct = abs(actual - predicted) / actual * 100
+            errors.append(error_pct)
+
+    return np.mean(errors) if errors else 0.0
+
+
 def get_dynamic_xgb_params(sample_count: int) -> dict:
     """
     Select XGBoost parameters based on dataset size for optimal performance.
@@ -500,23 +520,41 @@ def train_model_specific(make: str, model: str, dealer_listings: List[Dict[str, 
 
             model_xgb = xgb.train(**train_kwargs)
 
-        # Evaluate model
+        # Evaluate model and calculate performance metrics
         if dtest is not None:
             # Standard evaluation with test set
             y_pred = model_xgb.predict(dtest)
             mse = mean_squared_error(y_test, y_pred)
             r2 = r2_score(y_test, y_pred)
-            logger.info(f"Model performance for {make} {model}: MSE={mse:.2f}, R²={r2:.3f}")
+            mape = calculate_mape(y_test, y_pred)
+            logger.info(f"Model performance for {make} {model}: MSE={mse:.2f}, R²={r2:.3f}, MAPE={mape:.1f}%")
+
+            # Store performance metrics for later use
+            performance_metrics = {
+                'r2': r2,
+                'mape': mape,
+                'sample_count': sample_count,
+                'mse': mse
+            }
         else:
             # For tiny datasets, evaluate on training data (just for logging)
             y_pred_train = model_xgb.predict(dtrain)
             mse_train = mean_squared_error(y_train, y_pred_train)
             r2_train = r2_score(y_train, y_pred_train)
-            logger.info(f"Model performance for {make} {model} (training set): MSE={mse_train:.2f}, R²={r2_train:.3f}")
+            mape_train = calculate_mape(y_train, y_pred_train)
+            logger.info(f"Model performance for {make} {model} (training set): MSE={mse_train:.2f}, R²={r2_train:.3f}, MAPE={mape_train:.1f}%")
             logger.warning(f"No validation split used for tiny dataset ({sample_count} samples)")
 
-        # Save model and scaler
-        success = save_model_specific(make, model, model_xgb, scaler)
+            # Store performance metrics for later use
+            performance_metrics = {
+                'r2': r2_train,
+                'mape': mape_train,
+                'sample_count': sample_count,
+                'mse': mse_train
+            }
+
+        # Save model, scaler, and performance metrics
+        success = save_model_specific(make, model, model_xgb, scaler, performance_metrics)
 
         if success:
             logger.info(f"✅ Successfully trained and saved {make} {model}")
@@ -530,15 +568,16 @@ def train_model_specific(make: str, model: str, dealer_listings: List[Dict[str, 
         return False
 
 
-def save_model_specific(make: str, model: str, xgb_model: xgb.Booster, scaler: StandardScaler) -> bool:
+def save_model_specific(make: str, model: str, xgb_model: xgb.Booster, scaler: StandardScaler, performance_metrics: dict = None) -> bool:
     """
-    Save model and scaler to organized sub-folder structure.
+    Save model, scaler, and performance metrics to organized sub-folder structure.
 
     Args:
         make: Car make
         model: Car model
         xgb_model: Trained XGBoost model
         scaler: Feature scaler
+        performance_metrics: Dict with r2, mape, sample_count, mse
 
     Returns:
         bool: True if save succeeded, False otherwise
@@ -565,6 +604,13 @@ def save_model_specific(make: str, model: str, xgb_model: xgb.Booster, scaler: S
         with open(scaler_file, 'wb') as f:
             pickle.dump(scaler, f)
 
+        # Save performance metrics
+        if performance_metrics:
+            metrics_file = model_dir / "metrics.json"
+            import json
+            with open(metrics_file, 'w') as f:
+                json.dump(performance_metrics, f, indent=2)
+
         logger.info(f"Saved model to {model_dir}")
         return True
 
@@ -573,16 +619,16 @@ def save_model_specific(make: str, model: str, xgb_model: xgb.Booster, scaler: S
         return False
 
 
-def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler]]:
+def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler], Optional[dict]]:
     """
-    Load model-specific XGBoost model and scaler from sub-folder structure.
+    Load model-specific XGBoost model, scaler, and performance metrics from sub-folder structure.
 
     Args:
         make: Car make
         model: Car model
 
     Returns:
-        Tuple of (XGBoost model, scaler) or (None, None) if not found
+        Tuple of (XGBoost model, scaler, performance_metrics) or (None, None, None) if not found
     """
     try:
         # Create clean folder names
@@ -594,11 +640,12 @@ def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], O
         model_dir = project_root / "archive" / "ml_models" / make_clean / model_clean
         model_file = model_dir / "model.json"
         scaler_file = model_dir / "scaler.pkl"
+        metrics_file = model_dir / "metrics.json"
 
         # Check if files exist
         if not model_file.exists() or not scaler_file.exists():
             logger.debug(f"Model files not found for {make} {model}")
-            return None, None
+            return None, None, None
 
         # Load model with warning suppression
         xgb_model = xgb.Booster()
@@ -610,12 +657,19 @@ def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], O
         with open(scaler_file, 'rb') as f:
             scaler = pickle.load(f)
 
+        # Load performance metrics (optional, may not exist for older models)
+        performance_metrics = None
+        if metrics_file.exists():
+            import json
+            with open(metrics_file, 'r') as f:
+                performance_metrics = json.load(f)
+
         logger.debug(f"Loaded model for {make} {model}")
-        return xgb_model, scaler
+        return xgb_model, scaler, performance_metrics
 
     except Exception as e:
         logger.error(f"Error loading model for {make} {model}: {e}")
-        return None, None
+        return None, None, None
 
 
 if __name__ == "__main__":
