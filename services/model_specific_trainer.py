@@ -342,15 +342,17 @@ def train_model_specific(make: str, model: str, dealer_listings: List[Dict[str, 
             'seed': 42
         }
 
-        # Train model
-        model_xgb = xgb.train(
-            xgb_params,
-            dtrain,
-            num_boost_round=100,
-            evals=[(dtrain, 'train'), (dtest, 'test')],
-            verbose_eval=False,
-            early_stopping_rounds=10
-        )
+        # Train model with warning suppression
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*UBJSON format.*")
+            model_xgb = xgb.train(
+                xgb_params,
+                dtrain,
+                num_boost_round=100,
+                evals=[(dtrain, 'train'), (dtest, 'test')],
+                verbose_eval=False,
+                early_stopping_rounds=10
+            )
 
         # Evaluate model
         y_pred = model_xgb.predict(dtest)
@@ -398,8 +400,11 @@ def save_model_specific(make: str, model: str, xgb_model: xgb.Booster, scaler: S
         model_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model
-        model_file = model_dir / "model.xgb"
-        xgb_model.save_model(str(model_file))
+        model_file = model_dir / "model.json"
+        # Suppress XGBoost UBJSON format warning
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*UBJSON format.*")
+            xgb_model.save_model(str(model_file))
 
         # Save scaler
         scaler_file = model_dir / "scaler.pkl"
@@ -433,7 +438,7 @@ def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], O
         # Build paths
         project_root = Path(__file__).parent.parent
         model_dir = project_root / "archive" / "ml_models" / make_clean / model_clean
-        model_file = model_dir / "model.xgb"
+        model_file = model_dir / "model.json"
         scaler_file = model_dir / "scaler.pkl"
 
         # Check if files exist
@@ -441,9 +446,11 @@ def load_model_specific(make: str, model: str) -> Tuple[Optional[xgb.Booster], O
             logger.debug(f"Model files not found for {make} {model}")
             return None, None
 
-        # Load model
+        # Load model with warning suppression
         xgb_model = xgb.Booster()
-        xgb_model.load_model(str(model_file))
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*UBJSON format.*")
+            xgb_model.load_model(str(model_file))
 
         # Load scaler
         with open(scaler_file, 'rb') as f:

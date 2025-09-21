@@ -132,86 +132,73 @@ class DailyAutomationOrchestrator:
         """
         # Deal finding phase - no logging
 
-        if self.dry_run:
+        # Execute the full pipeline regardless of dry_run mode
+        # dry_run flag will be passed through to prevent actual database saving
+        try:
             if self.target_model:
-                logger.info(f"🎯 Would run scraping for model: {self.target_model} (across all makes)")
+                # Run scraping for the target model across all makes
+                # Since the scraping function filters by make+model, we need to run it for each make
+                from config.config import TARGET_VEHICLES_BY_MAKE
+
+                all_results = {
+                    'groups_processed': 0,
+                    'total_deals': 0,
+                    'quality_deals': 0,
+                    'target_model': self.target_model
+                }
+
+                makes_with_model = [make for make, models in TARGET_VEHICLES_BY_MAKE.items()
+                                   if self.target_model in models]
+
+                for make in makes_with_model:
+                    try:
+                        results = run_smart_grouped_scraping(
+                            max_groups=None,
+                            test_mode=self.dry_run,  # Pass dry_run as test_mode
+                            connection_pool_size=10,
+                            filter_make=make,
+                            filter_model=self.target_model,
+                            export_predictions=self.export_predictions,
+                            force_retrain=self.force_retrain
+                        )
+
+                        # Aggregate results
+                        all_results['groups_processed'] += results.get('groups_processed', 0)
+                        all_results['total_deals'] += results.get('total_deals', 0)
+                        all_results['quality_deals'] += results.get('quality_deals', 0)
+
+                    except Exception as e:
+                        print(f"Error processing {make} {self.target_model}: {e}")
+                        if self.verbose:
+                            import traceback
+                            traceback.print_exc()
+
+                # Results handled by main print statements
+                pass
+
+                return all_results
             else:
-                logger.info("🎯 Would run smart grouped scraping across all vehicle models")
-            logger.info("📧 Would send deal notifications if profitable deals found")
-            logger.info("💾 Would store results in Supabase database")
+                # Run the complete deal finding pipeline
+                results = run_smart_grouped_scraping(
+                    max_groups=None,  # Process all groups
+                    test_mode=self.dry_run,  # Pass dry_run as test_mode
+                    connection_pool_size=10,
+                    filter_make=None,
+                    filter_model=None,
+                    export_predictions=self.export_predictions,
+                    force_retrain=self.force_retrain
+                )
 
-            return {
-                'dry_run': True,
-                'groups_processed': 0,
-                'total_deals': 0,
-                'quality_deals': 0,
-                'target_model': self.target_model
-            }
+                # Results handled by main print statements
+                pass
 
-        else:
-            try:
-                if self.target_model:
-                    # Run scraping for the target model across all makes
-                    # Since the scraping function filters by make+model, we need to run it for each make
-                    from config.config import TARGET_VEHICLES_BY_MAKE
+                return results
 
-                    all_results = {
-                        'groups_processed': 0,
-                        'total_deals': 0,
-                        'quality_deals': 0,
-                        'target_model': self.target_model
-                    }
-
-                    makes_with_model = [make for make, models in TARGET_VEHICLES_BY_MAKE.items()
-                                       if self.target_model in models]
-
-                    for make in makes_with_model:
-                        try:
-                            results = run_smart_grouped_scraping(
-                                max_groups=None,
-                                test_mode=False,  # Enable database storage and notifications
-                                connection_pool_size=10,
-                                filter_make=make,
-                                filter_model=self.target_model,
-                                export_predictions=self.export_predictions
-                            )
-
-                            # Aggregate results
-                            all_results['groups_processed'] += results.get('groups_processed', 0)
-                            all_results['total_deals'] += results.get('total_deals', 0)
-                            all_results['quality_deals'] += results.get('quality_deals', 0)
-
-                        except Exception as e:
-                            print(f"Error processing {make} {self.target_model}: {e}")
-                            if self.verbose:
-                                import traceback
-                                traceback.print_exc()
-
-                    # Results handled by main print statements
-                    pass
-
-                    return all_results
-                else:
-                    # Run the complete deal finding pipeline
-                    results = run_smart_grouped_scraping(
-                        max_groups=None,  # Process all groups
-                        test_mode=False,  # Enable database storage and notifications
-                        connection_pool_size=10,
-                        filter_make=None,
-                        filter_model=None,
-                        export_predictions=self.export_predictions
-                    )
-
-                    # Results handled by main print statements
-                    pass
-
-                    return results
-
-            except Exception as e:
-                print(f"Error in deal finding automation: {e}")
-                if self.verbose:
-                    import traceback
-                    traceback.print_exc()
+        except Exception as e:
+            print(f"Error in deal finding automation: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
                 return {
                     'error': str(e),
                     'groups_processed': 0,

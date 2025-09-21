@@ -120,7 +120,7 @@ class DailyModelTrainingOrchestrator:
         model_clean = model.lower().replace(' ', '_').replace('-', '_')
 
         model_dir = self.model_base_path / make_clean / model_clean
-        model_file = model_dir / "model.xgb"
+        model_file = model_dir / "model.json"
         scaler_file = model_dir / "scaler.pkl"
 
         return model_file, scaler_file

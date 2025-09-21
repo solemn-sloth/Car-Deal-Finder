@@ -72,7 +72,7 @@ class SmartGroupingOrchestrator:
     4. Maintains all existing deal notification logic
     """
     
-    def __init__(self, connection_pool_size=10, export_predictions=False):
+    def __init__(self, connection_pool_size=10, export_predictions=False, force_retrain=False):
         # Initialize proxy manager for Cloudflare bypass (API-only mode)
         self.proxy_manager = None
         self._proxy_status_message = ""
@@ -89,6 +89,7 @@ class SmartGroupingOrchestrator:
         # Store connection pool size for worker initialization
         self.connection_pool_size = connection_pool_size
         self.export_predictions = export_predictions
+        self.force_retrain = force_retrain
         self.session_data = {
             'start_time': datetime.now().isoformat(),
             'groups_processed': 0,
@@ -278,8 +279,7 @@ class SmartGroupingOrchestrator:
                     if variant_vehicles:
                         # Analyze vehicles using enhanced analyzer
                         try:
-                            enhanced_analyse_listings(variant_vehicles, verbose=False, training_mode=False, export_predictions=self.export_predictions)
-                            output_manager.ml_model_status(f"Analysis complete for {config['variant_name']}")
+                            enhanced_analyse_listings(variant_vehicles, verbose=False, training_mode=False, export_predictions=self.export_predictions, force_retrain=self.force_retrain)
                         except Exception as ml_error:
                             error_msg = f"ML analysis failed for {config['variant_name']}: {str(ml_error)}"
                             errors.append(error_msg)
@@ -531,7 +531,7 @@ class SmartGroupingOrchestrator:
 # Main Pipeline Orchestration
 # ────────────────────────────────────────────────────────────
 
-def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool_size=10, filter_make=None, filter_model=None, export_predictions=False):
+def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool_size=10, filter_make=None, filter_model=None, export_predictions=False, force_retrain=False):
     """
     Run the complete smart grouped scraping and notification pipeline.
 
@@ -542,10 +542,11 @@ def run_smart_grouped_scraping(max_groups=None, test_mode=False, connection_pool
         filter_make: Filter to specific make (e.g., "BMW")
         filter_model: Filter to specific model (e.g., "3 Series")
         export_predictions: Export ML predictions to JSON with features
+        force_retrain: Force ML model retraining regardless of model age
     """
     # Startup banner is now handled by main.py automation orchestrator
     # Initialize orchestrator silently with connection pooling
-    orchestrator = SmartGroupingOrchestrator(connection_pool_size=connection_pool_size, export_predictions=export_predictions)
+    orchestrator = SmartGroupingOrchestrator(connection_pool_size=connection_pool_size, export_predictions=export_predictions, force_retrain=force_retrain)
     start_time = datetime.now()
 
     try:

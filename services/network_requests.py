@@ -93,12 +93,14 @@ class ParallelCoordinator:
         self.completed_count = 0
         self.failed_workers = set()
         self.results_lock = threading.Lock()
+        self.total_tasks = 0
         self.last_result_status = "⚠️ Starting up"
 
     def add_work(self, tasks: List[APITask]):
         """Add tasks to work queue for parallel distribution."""
         for task in tasks:
             self.work_queue.put(task)
+        self.total_tasks = len(tasks)
 
     def get_next_work(self, worker_id: int, timeout: float = 1) -> Optional[APITask]:
         """Get next task for worker, respecting worker health."""
@@ -156,7 +158,17 @@ class ParallelCoordinator:
                 if result.get('success', False):
                     car_count = result.get('metadata', {}).get('car_count', 0)
                     total_listings += car_count
+            # Add current progress from active workers
+            total_listings += getattr(self, '_active_progress', 0)
             return total_listings
+
+    def update_active_progress(self, worker_id: int, current_count: int):
+        """Update active progress for a specific worker."""
+        with self.results_lock:
+            if not hasattr(self, '_worker_progress'):
+                self._worker_progress = {}
+            self._worker_progress[worker_id] = current_count
+            self._active_progress = sum(self._worker_progress.values())
 
     def _is_worker_detected(self, result: Dict[str, Any]) -> bool:
         """Check if API worker was detected/blocked."""
@@ -247,7 +259,9 @@ class ParallelCoordinator:
                             max_year=task.max_year,
                             min_mileage=task.min_mileage,
                             max_mileage=task.max_mileage,
-                            max_pages=task.max_pages
+                            max_pages=task.max_pages,
+                            progress_callback=progress_callback,
+                            coordinator=self
                         )
 
                         processing_time = time.time() - start_time
@@ -895,7 +909,8 @@ class AutoTraderAPIClient:
     
     def get_all_cars(self, make: str, model: str, postcode: str = "M15 4FN",
                      min_year: int = 2010, max_year: int = 2023,
-                     min_mileage: int = 0, max_mileage: int = 100000, max_pages: int = None) -> List[Dict]:
+                     min_mileage: int = 0, max_mileage: int = 100000, max_pages: int = None,
+                     progress_callback: Optional[callable] = None, coordinator = None) -> List[Dict]:
         """
         Get all cars from multiple pages
 
@@ -908,6 +923,8 @@ class AutoTraderAPIClient:
             min_mileage: Minimum mileage
             max_mileage: Maximum mileage
             max_pages: Maximum number of pages to fetch (None for all)
+            progress_callback: Optional callback for progress updates
+            coordinator: Optional coordinator for thread-safe progress tracking
 
         Returns:
             List of car listings data
@@ -966,7 +983,16 @@ class AutoTraderAPIClient:
                     processed_listings.append(processed_deal['processed'])
             
             all_cars.extend(processed_listings)
-            
+
+            # Report progress after each page if callback is provided
+            if progress_callback and coordinator:
+                # Update coordinator with this worker's progress
+                worker_id = getattr(self, 'worker_id', 0)
+                coordinator.update_active_progress(worker_id, len(all_cars))
+                # Get total across all workers and report progress
+                total_listings = coordinator.get_total_listings_scraped()
+                progress_callback(total_listings, coordinator.total_tasks or 1, None)
+
             # Check if there are more pages
             page_info = search_results.get('page', {})
             current_page = page_info.get('number', 1)

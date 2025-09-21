@@ -800,7 +800,13 @@ def batch_scrape_price_markers(urls, headless=True, progress_callback=None, test
 
         # Mark progress as complete using output manager
         output_manager = get_output_manager()
-        output_manager.progress_complete("retail_prices")
+
+        # Calculate final statistics
+        final_count = len(coordinator.results)
+        elapsed_time = time.time() - start_time
+        final_rate = (final_count * 60 / elapsed_time) if elapsed_time > 0 else 0
+
+        output_manager.progress_complete("retail_prices", count=final_count, rate=final_rate, total_count=total_urls)
 
         logger.debug(f"✅ GraphQL API orchestration completed with {len(coordinator.results)} results")
         return coordinator.results

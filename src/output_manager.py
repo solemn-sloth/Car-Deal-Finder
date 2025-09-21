@@ -88,13 +88,11 @@ class OutputManager:
                 rate = (count * 60) / elapsed_time  # listings per minute
                 dots = "." * 50  # Full progress bar since we're done
                 # Clear line and show complete result with operation prefix
-                print(f"\r{' ' * 150}\r🔍 Scraping Listings{dots} {count} listings | {rate:.1f} listings/min | Complete!{' ' * 20}")
+                print(f"\r{' ' * 150}\r🔍 Scraping Listings {dots} {count} listings | {rate:.1f} listings/min | Complete!{' ' * 20}")
             else:
                 # Fallback if no timing info
                 dots = "." * 50
-                print(f"\r{' ' * 150}\r🔍 Scraping Listings{dots} {count} listings | Complete!{' ' * 20}")
-
-            print()  # Add newline after completion
+                print(f"\r{' ' * 150}\r🔍 Scraping Listings {dots} {count} listings | Complete!{' ' * 20}")
 
             if missing_fuel > 0:
                 self._print(f"   ⚠️ {missing_fuel} vehicles missing fuel type data (fallback applied)")
@@ -141,9 +139,9 @@ class OutputManager:
                 # Use 1 dot per 10 pages for API scraping (no total known)
                 progress_bar = "." * min(50, current // 10)
                 if rate > 0:
-                    message = f"🔍 Scraping Listings{progress_bar} {current} listings | {rate:.1f} listings/min"
+                    message = f"🔍 Scraping Listings {progress_bar} {current} listings | {rate:.1f} listings/min"
                 else:
-                    message = f"🔍 Scraping Listings{progress_bar} {current} listings"
+                    message = f"🔍 Scraping Listings {progress_bar} {current} listings"
             elif operation == "retail_prices":
                 # Use percentage-based dots for operations with known totals
                 progress_bar = "." * min(50, int(percentage / 2))
@@ -165,13 +163,17 @@ class OutputManager:
 
             self._current_progress = message
 
-    def progress_complete(self, operation: str = ""):
-        """Complete progress display."""
+    def progress_complete(self, operation: str = "", count: int = None, rate: float = None, total_count: int = None):
+        """Complete progress display with optional final statistics."""
         with self._output_lock:
             if self._current_progress:
                 # Replace with completion message with full dots
                 dots = "." * 50
-                if operation == "retail_prices":
+                if operation == "retail_prices" and count is not None and rate is not None:
+                    # Show full statistics like API scraping
+                    rate_text = f" | {rate:.1f} URLs/min" if rate > 0 else ""
+                    print(f"\r{' ' * 150}\r🔍 Scraping Retail Prices {dots} {count} URLs{rate_text} | Complete!{' ' * 20}")
+                elif operation == "retail_prices":
                     print(f"\r{' ' * 150}\r🔍 Scraping Retail Prices {dots} Complete!{' ' * 20}")
                 else:
                     print(f"\r{' ' * 150}\r✅ {operation}: {dots} Complete!{' ' * 20}")
@@ -195,7 +197,7 @@ class OutputManager:
 
     def analysis_start(self):
         """Display analysis start header."""
-        self._print("\n📊 Analysis Results:")
+        self._print("📊 Analysis Results:")
 
     def analysis_results(self, avg_market_value: float, confidence: float, sample_size: int, deals_found: int):
         """Display analysis results."""
@@ -206,7 +208,7 @@ class OutputManager:
 
     def group_complete(self, make: str, model: str):
         """Display group completion."""
-        self._print(f"\n✅ {make} {model} complete")
+        self._print(f"✅ {make} {model} complete")
         self._print("------------------------------------------------------------")
 
     def no_quality_deals(self):

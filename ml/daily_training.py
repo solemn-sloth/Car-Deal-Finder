@@ -81,7 +81,7 @@ Examples:
                 make = model_info['make']
                 model = model_info['model']
                 model_dir = trainer.get_model_path(make, model)[0].parent
-                exists = "✅" if model_dir.joinpath("model.xgb").exists() else "🆕"
+                exists = "✅" if model_dir.joinpath("model.json").exists() else "🆕"
                 print(f"  {i:2d}. {exists} {make} {model}")
 
             print()

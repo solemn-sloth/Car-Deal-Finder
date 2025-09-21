@@ -913,16 +913,18 @@ def train_xgboost_model(df: pd.DataFrame, make: str, model: str = None) -> Tuple
         'seed': 42
     }
     
-    # Train the model
+    # Train the model with warning suppression
     logger.info(f"Training XGBoost model on {len(X_train)} samples")
-    model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=100,
-        evals=[(dtrain, 'train'), (dval, 'val')],
-        early_stopping_rounds=10,
-        verbose_eval=False
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*UBJSON format.*")
+        model = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=100,
+            evals=[(dtrain, 'train'), (dval, 'val')],
+            early_stopping_rounds=10,
+            verbose_eval=False
+        )
     
     # Evaluate model
     val_preds = model.predict(dval)
@@ -934,7 +936,11 @@ def train_xgboost_model(df: pd.DataFrame, make: str, model: str = None) -> Tuple
     # Save the model
     model_filename = f"{make}_{model or 'all'}_model.json"
     model_path = os.path.join(MODELS_PATH, model_filename)
-    model.save_model(model_path)
+
+    # Suppress XGBoost UBJSON format warning
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*UBJSON format.*")
+        model.save_model(model_path)
     
     # Save the scaler
     scaler_filename = f"{make}_{model or 'all'}_scaler.pkl"
@@ -950,7 +956,8 @@ def train_xgboost_model(df: pd.DataFrame, make: str, model: str = None) -> Tuple
 def load_or_train_model(
     make: str,
     model: str,
-    dealer_data: List[Dict[str, Any]]
+    dealer_data: List[Dict[str, Any]],
+    force_retrain: bool = False
 ) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler]]:
     """Load existing model or automatically train if missing
 
@@ -958,6 +965,7 @@ def load_or_train_model(
         make: Car manufacturer
         model: Car model
         dealer_data: List of dealer listings for training if needed
+        force_retrain: Force retraining regardless of model age
 
     Returns:
         Tuple of (XGBoost model, feature scaler) or (None, None) if training fails
@@ -965,17 +973,12 @@ def load_or_train_model(
     # Check if model exists and if it's too old before loading
     model_age_days = get_model_age_days(make, model)
 
-    if model_age_days < 999:  # Model exists
+    if not force_retrain and model_age_days < 999:  # Model exists and not forcing retrain
         if model_age_days <= 14:  # Model is fresh
             # Load existing fresh model
             from services.model_specific_trainer import load_model_specific
             xgb_model, scaler = load_model_specific(make, model)
             if xgb_model is not None and scaler is not None:
-                from src.output_manager import get_output_manager
-                output_manager = get_output_manager()
-                output_manager.ml_model_status(f"Found existing model ({model_age_days} days old)")
-                output_manager.ml_model_status("Model ready - no training needed")
-                output_manager.ml_model_complete()
                 return xgb_model, scaler
             else:
                 from src.output_manager import get_output_manager
@@ -987,9 +990,7 @@ def load_or_train_model(
             output_manager.ml_model_status(f"Found existing model ({model_age_days} days old)")
             output_manager.ml_model_status("Model too old - retraining needed")
     else:
-        from src.output_manager import get_output_manager
-        output_manager = get_output_manager()
-        output_manager.ml_model_status("No model found - training needed")
+        pass
 
     # Proceed with automatic training (either no model or old model)
     # Check if we have enough dealer data for training
@@ -1004,16 +1005,7 @@ def load_or_train_model(
         # Import training function
         from services.model_specific_trainer import train_model_specific
 
-        from src.output_manager import get_output_manager
-        output_manager = get_output_manager()
-        output_manager.ml_model_status(f"Training model with {len(dealer_data)} dealer listings...")
 
-        # Debug: Check if dealer_data has market_value
-        market_value_count = len([d for d in dealer_data if d.get('market_value') and d.get('market_value') > 0])
-        if market_value_count > 0:
-            output_manager.ml_model_status(f"Debug: Found {market_value_count} listings with market_value data")
-        else:
-            output_manager.ml_model_status(f"Debug: No listings have market_value data - training will likely fail")
 
         # Attempt to train the model with timeout
         import threading
@@ -1121,11 +1113,9 @@ def load_or_train_model(
                                 xgb_model, scaler = load_model_specific(make, model)
                                 if xgb_model is not None and scaler is not None:
                                     output_manager.ml_model_status("✅ Successfully trained model after retail price scraping")
-
                                     # Mark retail scraping as completed
                                     from config.config import mark_retail_scraping_completed
                                     mark_retail_scraping_completed()
-
                                     output_manager.ml_model_complete()
                                     return xgb_model, scaler
                                 else:
@@ -1164,7 +1154,6 @@ def load_or_train_model(
             if xgb_model is not None and scaler is not None:
                 from src.output_manager import get_output_manager
                 output_manager = get_output_manager()
-                output_manager.ml_model_status("Successfully trained and loaded model")
                 output_manager.ml_model_complete()
                 return xgb_model, scaler
             else:
@@ -1217,7 +1206,7 @@ def get_model_age_days(make: str, model: str) -> int:
         else:
             return 999  # Model doesn't exist
 
-    except Exception:
+    except Exception as e:
         return 999  # Error occurred, assume old
 
 
@@ -1796,7 +1785,7 @@ def main():
 # Compatibility functions for scraper.py integration
 # ────────────────────────────────────────────────────────────
 
-def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, verbose: bool = False, training_mode: bool = False, export_predictions: bool = False) -> None:
+def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, verbose: bool = False, training_mode: bool = False, export_predictions: bool = False, force_retrain: bool = False) -> None:
     """
     Enhanced analysis using universal ML model for vehicle profit prediction.
     Compatible with the existing scraper.py interface.
@@ -1820,15 +1809,44 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
     output_manager = get_output_manager()
     output_manager.ml_model_processing_start()
 
+    # First, check if we have existing models for the main make/model combinations
+    # Extract the most common make/model to check for existing models
+    if listings:
+        # Get most common make/model combination
+        make_model_counts = {}
+        for listing in listings:
+            make = listing.get('make', '').lower()
+            model = listing.get('model', '').lower()
+            key = f"{make}_{model}"
+            make_model_counts[key] = make_model_counts.get(key, 0) + 1
+
+        if make_model_counts:
+            # Check the most common make/model for existing model
+            most_common_key = max(make_model_counts, key=make_model_counts.get)
+            make, model = most_common_key.split('_', 1)
+            model_age_days = get_model_age_days(make, model)
+
+            if not force_retrain and model_age_days < 999 and model_age_days <= 14:
+                # Fresh model exists - no training needed (unless force_retrain is True)
+                output_manager.ml_model_status(f"Using existing model ({model_age_days} days old)")
+                # Skip retail scraping and use individual processing
+                _enhanced_analyse_listings_individual(listings, cfg, verbose, output_manager, training_mode, export_predictions, force_retrain)
+                return
+            elif model_age_days < 999:
+                # Model exists but is old (or force_retrain is True)
+                if force_retrain:
+                    output_manager.ml_model_status(f"Force retraining model ({model_age_days} days old)")
+                else:
+                    output_manager.ml_model_status(f"Training new model ({model_age_days} days old)")
+            else:
+                # No existing model
+                output_manager.ml_model_status("Training new model (no existing model)")
+
     # Check if retail scraping is needed (either due by schedule OR missing market_value data)
     listings_need_market_value = listings and len([l for l in listings if l.get('market_value') and l.get('market_value') > 0]) == 0
     retail_scraping_needed = is_retail_scraping_due() or listings_need_market_value
 
     if retail_scraping_needed:
-        if is_retail_scraping_due():
-            output_manager.ml_model_status("⚠️ Weekly retail scraping is due - triggering automatic retail price scraping")
-        else:
-            output_manager.ml_model_status("⚠️ ML training needs market_value data - triggering automatic retail price scraping")
 
         # Auto-trigger retail price scraping
         try:
@@ -1862,7 +1880,6 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
                             updated_count += 1
 
                     output_manager.ml_model_status(f"Updated {updated_count} listings with market values")
-
                     # Update retail scraping schedule
                     from config.config import mark_retail_scraping_complete
                     mark_retail_scraping_complete(success=True, total_vehicles=updated_count, notes="Auto-triggered during ML analysis")
@@ -1888,16 +1905,15 @@ def enhanced_analyse_listings(listings: List[Dict[str, Any]], cfg: Dict = None, 
         )
         return
 
-    output_manager.ml_model_status("Using individual model processing (fallback mode)")
 
     # Use individual model processing directly (no universal model)
-    _enhanced_analyse_listings_individual(listings, cfg, verbose, output_manager, training_mode, export_predictions)
+    _enhanced_analyse_listings_individual(listings, cfg, verbose, output_manager, training_mode, export_predictions, force_retrain)
 
     # Analysis results will be shown by the individual processing function
     return
 
 
-def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: Dict, verbose: bool = False, output_manager = None, training_mode: bool = False, export_predictions: bool = False) -> None:
+def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: Dict, verbose: bool = False, output_manager = None, training_mode: bool = False, export_predictions: bool = False, force_retrain: bool = False) -> None:
     """
     Fallback enhanced analysis using individual make/model processing.
     This is the original enhanced_analyse_listings logic.
@@ -1974,7 +1990,7 @@ def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: D
                 })
 
             # Load or train model for this make/model
-            xgb_model, scaler = load_or_train_model(make, model, dealer_data)
+            xgb_model, scaler = load_or_train_model(make, model, dealer_data, force_retrain)
 
             if xgb_model is None or scaler is None:
                 output_manager.ml_model_status(f"❌ Unable to create model for {make} {model} - skipping analysis")
@@ -2065,6 +2081,7 @@ def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: D
     listings.extend(analyzed_listings)
 
     # Show analysis results based on ALL predictions (not just profitable ones)
+    output_manager.analysis_start()
     if all_predictions:
         # Calculate stats from all predictions made
         total_predictions = len(all_predictions)
