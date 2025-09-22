@@ -72,6 +72,7 @@ os.makedirs(DATA_OUTPUTS_PATH, exist_ok=True)
 
 # Global execution mode tracking
 EXECUTION_MODE = "production"  # "test" or "production"
+USE_KNN_MODEL = False  # Global flag for KNN vs XGBoost model selection
 
 def set_execution_mode(mode: str):
     """Set the global execution mode for data saving
@@ -94,6 +95,22 @@ def get_execution_mode() -> str:
     """Get the current execution mode"""
     global EXECUTION_MODE
     return EXECUTION_MODE
+
+
+def set_model_type(use_knn: bool):
+    """Set whether to use KNN or XGBoost models
+
+    Args:
+        use_knn: True for KNN, False for XGBoost
+    """
+    global USE_KNN_MODEL
+    USE_KNN_MODEL = use_knn
+
+
+def get_model_type() -> str:
+    """Get the current model type"""
+    global USE_KNN_MODEL
+    return "KNN" if USE_KNN_MODEL else "XGBoost"
 
 
 # Feature Extraction Helper Functions
@@ -958,7 +975,7 @@ def load_or_train_model(
     model: str,
     dealer_data: List[Dict[str, Any]],
     force_retrain: bool = False
-) -> Tuple[Optional[xgb.Booster], Optional[StandardScaler]]:
+) -> Tuple[Optional[Any], Optional[StandardScaler], Optional[dict]]:
     """Load existing model or automatically train if missing
 
     Args:
@@ -968,26 +985,35 @@ def load_or_train_model(
         force_retrain: Force retraining regardless of model age
 
     Returns:
-        Tuple of (XGBoost model, feature scaler) or (None, None) if training fails
+        Tuple of (model, feature scaler, performance_metrics) or (None, None, None) if training fails
+        Model type depends on USE_KNN_MODEL global flag
     """
+    global USE_KNN_MODEL
+    model_type = "KNN" if USE_KNN_MODEL else "XGBoost"
+
     # Check if model exists and if it's too old before loading
     model_age_days = get_model_age_days(make, model)
 
     if not force_retrain and model_age_days < 999:  # Model exists and not forcing retrain
         if model_age_days <= 14:  # Model is fresh
-            # Load existing fresh model
-            from services.model_specific_trainer import load_model_specific
-            xgb_model, scaler, performance_metrics = load_model_specific(make, model)
-            if xgb_model is not None and scaler is not None:
-                return xgb_model, scaler
+            # Load existing fresh model based on type
+            if USE_KNN_MODEL:
+                from services.knn_trainer import load_knn_model
+                loaded_model, scaler, performance_metrics = load_knn_model(make, model)
+            else:
+                from services.model_specific_trainer import load_model_specific
+                loaded_model, scaler, performance_metrics = load_model_specific(make, model)
+
+            if loaded_model is not None and scaler is not None:
+                return loaded_model, scaler, performance_metrics
             else:
                 from src.output_manager import get_output_manager
                 output_manager = get_output_manager()
-                output_manager.ml_model_status("❌ Failed to load existing model - will retrain")
+                output_manager.ml_model_status(f"❌ Failed to load existing {model_type} model - will retrain")
         else:
             from src.output_manager import get_output_manager
             output_manager = get_output_manager()
-            output_manager.ml_model_status(f"Found existing model ({model_age_days} days old)")
+            output_manager.ml_model_status(f"Found existing {model_type} model ({model_age_days} days old)")
             output_manager.ml_model_status("Model too old - retraining needed")
     else:
         pass
@@ -999,13 +1025,16 @@ def load_or_train_model(
         output_manager = get_output_manager()
         output_manager.ml_model_status(f"❌ Insufficient dealer data (need 5, have {len(dealer_data) if dealer_data else 0})")
         output_manager.ml_model_complete()
-        return None, None
+        return None, None, None
 
     try:
-        # Import training function
-        from services.model_specific_trainer import train_model_specific
-
-
+        # Import training functions based on model type
+        if USE_KNN_MODEL:
+            from services.knn_trainer import train_knn_model
+            train_function = train_knn_model
+        else:
+            from services.model_specific_trainer import train_model_specific
+            train_function = train_model_specific
 
         # Attempt to train the model with timeout
         import threading
@@ -1014,7 +1043,7 @@ def load_or_train_model(
 
         def training_worker():
             try:
-                training_result[0] = train_model_specific(make, model, dealer_data)
+                training_result[0] = train_function(make, model, dealer_data)
             except Exception as e:
                 training_error[0] = e
 
@@ -1027,9 +1056,9 @@ def load_or_train_model(
         if training_thread.is_alive():
             from src.output_manager import get_output_manager
             output_manager = get_output_manager()
-            output_manager.ml_model_status("❌ Model training timed out after 10 minutes")
+            output_manager.ml_model_status(f"❌ {model_type} model training timed out after 10 minutes")
             output_manager.ml_model_complete()
-            return None, None
+            return None, None, None
         elif training_error[0]:
             from src.output_manager import get_output_manager
             output_manager = get_output_manager()
@@ -1089,7 +1118,7 @@ def load_or_train_model(
 
                             def training_worker_retry():
                                 try:
-                                    training_result_retry[0] = train_model_specific(make, model, updated_dealer_data)
+                                    training_result_retry[0] = train_function(make, model, updated_dealer_data)
                                 except Exception as e:
                                     training_error_retry[0] = e
 
@@ -1109,72 +1138,82 @@ def load_or_train_model(
                                 return None, None
                             elif training_result_retry[0]:
                                 # Training succeeded after retail scraping
-                                from services.model_specific_trainer import load_model_specific
-                                xgb_model, scaler, performance_metrics = load_model_specific(make, model)
-                                if xgb_model is not None and scaler is not None:
-                                    output_manager.ml_model_status("✅ Successfully trained model after retail price scraping")
+                                if USE_KNN_MODEL:
+                                    from services.knn_trainer import load_knn_model
+                                    trained_model, scaler, performance_metrics = load_knn_model(make, model)
+                                else:
+                                    from services.model_specific_trainer import load_model_specific
+                                    trained_model, scaler, performance_metrics = load_model_specific(make, model)
+
+                                if trained_model is not None and scaler is not None:
+                                    output_manager.ml_model_status(f"✅ Successfully trained {model_type} model after retail price scraping")
                                     # Mark retail scraping as completed
                                     from config.config import mark_retail_scraping_completed
                                     mark_retail_scraping_completed()
                                     output_manager.ml_model_complete()
-                                    return xgb_model, scaler
+                                    return trained_model, scaler, performance_metrics
                                 else:
-                                    output_manager.ml_model_status("❌ Training succeeded but failed to load model")
+                                    output_manager.ml_model_status(f"❌ {model_type} training succeeded but failed to load model")
                                     output_manager.ml_model_complete()
-                                    return None, None
+                                    return None, None, None
                             else:
                                 output_manager.ml_model_status("❌ Retry training returned no result")
                                 output_manager.ml_model_complete()
-                                return None, None
+                                return None, None, None
                         else:
                             output_manager.ml_model_status("❌ Retail price scraping returned no data")
                             output_manager.ml_model_complete()
-                            return None, None
+                            return None, None, None
                     else:
                         output_manager.ml_model_status("❌ No listings with URLs available for retail price scraping")
                         output_manager.ml_model_complete()
-                        return None, None
+                        return None, None, None
 
                 except Exception as scraping_error:
                     output_manager.ml_model_status(f"❌ Automatic retail price scraping failed: {scraping_error}")
                     output_manager.ml_model_complete()
-                    return None, None
+                    return None, None, None
             else:
                 # Original error handling for non-market_value errors
-                output_manager.ml_model_status(f"❌ Model training failed: {training_error[0]}")
+                output_manager.ml_model_status(f"❌ {model_type} training failed: {training_error[0]}")
                 output_manager.ml_model_complete()
-                return None, None
+                return None, None, None
         else:
             success = training_result[0]
 
         if success:
             # Try to load the newly trained model
-            from services.model_specific_trainer import load_model_specific
-            xgb_model, scaler, performance_metrics = load_model_specific(make, model)
-            if xgb_model is not None and scaler is not None:
+            if USE_KNN_MODEL:
+                from services.knn_trainer import load_knn_model
+                trained_model, scaler, performance_metrics = load_knn_model(make, model)
+            else:
+                from services.model_specific_trainer import load_model_specific
+                trained_model, scaler, performance_metrics = load_model_specific(make, model)
+
+            if trained_model is not None and scaler is not None:
                 from src.output_manager import get_output_manager
                 output_manager = get_output_manager()
                 output_manager.ml_model_complete()
-                return xgb_model, scaler
+                return trained_model, scaler, performance_metrics
             else:
                 from src.output_manager import get_output_manager
                 output_manager = get_output_manager()
-                output_manager.ml_model_status("❌ Model training appeared successful but failed to load")
+                output_manager.ml_model_status(f"❌ {model_type} training appeared successful but failed to load")
                 output_manager.ml_model_complete()
-                return None, None
+                return None, None, None
         else:
             from src.output_manager import get_output_manager
             output_manager = get_output_manager()
-            output_manager.ml_model_status("❌ Failed to train model")
+            output_manager.ml_model_status(f"❌ Failed to train {model_type} model")
             output_manager.ml_model_complete()
-            return None, None
+            return None, None, None
 
     except Exception as e:
         from src.output_manager import get_output_manager
         output_manager = get_output_manager()
-        output_manager.ml_model_status(f"❌ Error during training: {str(e)}")
+        output_manager.ml_model_status(f"❌ Error during {model_type} training: {str(e)}")
         output_manager.ml_model_complete()
-        return None, None
+        return None, None, None
 
 
 def get_model_age_days(make: str, model: str) -> int:
@@ -1211,22 +1250,74 @@ def get_model_age_days(make: str, model: str) -> int:
 
 
 # Prediction and Deal Analysis Functions
+def detect_model_feature_count(scaler: StandardScaler) -> int:
+    """
+    Detect if a model was trained with different feature counts:
+    - 7 features: old models (with asking_price, no market context)
+    - 11 features: intermediate models (with asking_price + market context) - caused overfitting
+    - 10 features: intermediate models (no asking_price, with market context) - caused overfitting
+    - 6 features: old numeric-only models (no asking_price, no market context) - simple and robust
+    - 3 features: new categorical models (numeric features only scaled) - XGBoost native categorical
+
+    Args:
+        scaler: StandardScaler from the trained model
+
+    Returns:
+        int: Feature count expected by the model
+    """
+    try:
+        # Check the scaler's expected feature count
+        expected_features = scaler.n_features_in_
+
+        if expected_features == 7:
+            logger.debug("Detected old 7-feature model (legacy with asking_price)")
+            return 7
+        elif expected_features == 11:
+            logger.debug("Detected intermediate 11-feature model (asking_price + market context)")
+            return 11
+        elif expected_features == 10:
+            logger.debug("Detected intermediate 10-feature model (no asking_price, with market context)")
+            return 10
+        elif expected_features == 6:
+            logger.debug("Detected old 6-feature model (simple and robust)")
+            return 6
+        elif expected_features == 3:
+            logger.debug("Detected new categorical model (XGBoost native categorical support)")
+            return 3
+        else:
+            logger.warning(f"Unexpected feature count {expected_features}, defaulting to 7-feature mode")
+            return 7
+
+    except AttributeError:
+        # Older sklearn versions might not have n_features_in_
+        logger.warning("Cannot detect feature count, defaulting to 7-feature mode for compatibility")
+        return 7
+
+
 def predict_market_values(
     private_listings: List[Dict[str, Any]],
-    xgb_model: xgb.Booster,
-    scaler: StandardScaler
+    model: Any,
+    scaler: StandardScaler,
+    performance_metrics: dict = None
 ) -> pd.DataFrame:
     """Predict market values for private seller listings using model-specific features
 
     Args:
         private_listings: List of car listings from private sellers
-        xgb_model: Trained XGBoost model
+        model: Trained model (XGBoost or KNN)
         scaler: Feature scaler
+        performance_metrics: Model metadata (required for KNN)
 
     Returns:
         DataFrame with listings and predicted market values
     """
-    # Use model-specific feature preparation (no one-hot encoding)
+    # Check if we're using KNN model
+    global USE_KNN_MODEL
+    if USE_KNN_MODEL:
+        # Use KNN prediction path
+        return predict_with_knn_model(private_listings, model, scaler, performance_metrics)
+
+    # Use model-specific feature preparation for XGBoost (no one-hot encoding)
     from services.model_specific_trainer import prepare_model_specific_features
     from src.output_manager import get_output_manager
 
@@ -1243,14 +1334,58 @@ def predict_market_values(
         return pd.DataFrame()
 
 
-    # Get feature columns for prediction (model-specific, no make/model encoding)
-    feature_columns = ['asking_price', 'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric']
-    
+    # Detect if this model expects 7 features (old) or 11 features (new)
+    expected_feature_count = detect_model_feature_count(scaler)
+
+    # Define feature columns based on model type
+    if expected_feature_count == 7:
+        # Legacy 7-feature models (with asking_price, no market context)
+        feature_columns = ['asking_price', 'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric']
+        logger.debug("Using legacy 7-feature mode for prediction (with asking_price)")
+    elif expected_feature_count == 11:
+        # Intermediate 11-feature models (with asking_price + market context) - overfitting prone
+        feature_columns = [
+            'asking_price', 'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric',
+            'n_similar_training', 'price_percentile_rank', 'mileage_for_age_learned', 'spec_similarity_score'
+        ]
+        logger.debug("Using intermediate 11-feature mode for prediction (asking_price + market context)")
+    elif expected_feature_count == 10:
+        # Intermediate 10-feature models (no asking_price, with market context) - overfitting prone
+        feature_columns = [
+            'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric',
+            'n_similar_training', 'price_percentile_rank', 'mileage_for_age_learned', 'spec_similarity_score'
+        ]
+        logger.debug("Using intermediate 10-feature mode for prediction (no asking_price, with market context)")
+    elif expected_feature_count == 6:
+        # Old 6-feature models (simple and robust)
+        feature_columns = [
+            'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric'
+        ]
+        logger.debug("Using old 6-feature mode for prediction (simple and robust)")
+    elif expected_feature_count == 3:
+        # New categorical models - handle differently
+        logger.debug("Using new categorical model for prediction (XGBoost native categorical)")
+        return predict_with_categorical_model(private_listings, xgb_model, scaler, features_df)
+    else:
+        # Default fallback
+        feature_columns = [
+            'mileage', 'age', 'fuel_type_numeric', 'transmission_numeric', 'engine_size', 'spec_numeric'
+        ]
+        logger.debug("Using fallback 6-feature mode for prediction")
+
     # Check if all required columns exist in the DataFrame, add any missing ones
     for col in feature_columns:
         if col not in features_df.columns:
             logger.warning(f"Column {col} missing in prediction data, adding with default values")
-            features_df[col] = 0
+            # Use appropriate defaults based on feature type
+            if col in ['n_similar_training']:
+                features_df[col] = 0  # No similar cars found
+            elif col in ['price_percentile_rank', 'mileage_for_age_learned']:
+                features_df[col] = 0.5  # Median position
+            elif col in ['spec_similarity_score']:
+                features_df[col] = 0.1  # Low similarity (rare spec)
+            else:
+                features_df[col] = 0  # Default for other features
     
     # Ensure all columns are numeric before scaling (same process as in training)
     for col in feature_columns:
@@ -1271,7 +1406,7 @@ def predict_market_values(
     dtest = xgb.DMatrix(X_scaled)
 
     # Predict market values directly
-    predicted_market_values = xgb_model.predict(dtest)
+    predicted_market_values = model.predict(dtest)
 
     # Add predictions to DataFrame
     features_df['predicted_market_value'] = predicted_market_values
@@ -1307,26 +1442,216 @@ def predict_market_values(
     return result
 
 
+def predict_with_categorical_model(
+    private_listings: List[Dict[str, Any]],
+    xgb_model: xgb.Booster,
+    scaler: StandardScaler,
+    features_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Predict market values using new categorical XGBoost models with native categorical support
+
+    Args:
+        private_listings: List of car listings from private sellers
+        xgb_model: Trained XGBoost model with categorical support
+        scaler: Feature scaler (only scales numeric features)
+        features_df: Prepared features DataFrame
+
+    Returns:
+        DataFrame with listings and predicted market values
+    """
+    logger.debug("Using categorical model prediction path")
+
+    # Define feature structure for categorical models
+    numeric_features = ['mileage', 'age', 'engine_size']
+    categorical_features = ['fuel_type_extracted', 'transmission_extracted', 'spec_normalized']
+
+    # Check if categorical features exist, if not create defaults
+    for cat_feature in categorical_features:
+        if cat_feature not in features_df.columns:
+            logger.warning(f"Missing categorical feature {cat_feature}, using defaults")
+            if cat_feature == 'fuel_type_extracted':
+                features_df[cat_feature] = 'petrol'
+            elif cat_feature == 'transmission_extracted':
+                features_df[cat_feature] = 'manual'
+            elif cat_feature == 'spec_normalized':
+                features_df[cat_feature] = ''
+
+    # Scale only numeric features
+    if all(col in features_df.columns for col in numeric_features):
+        numeric_scaled = scaler.transform(features_df[numeric_features])
+        numeric_df = pd.DataFrame(numeric_scaled, columns=numeric_features, index=features_df.index)
+
+        # Convert categorical features to pandas categorical type
+        categorical_df = features_df[categorical_features].copy()
+        for col in categorical_features:
+            categorical_df[col] = categorical_df[col].astype('category')
+
+        # Combine scaled numeric with categorical features
+        combined_df = pd.concat([numeric_df, categorical_df], axis=1)
+    else:
+        logger.error("Missing required numeric features for categorical model")
+        return pd.DataFrame()
+
+    # Create DMatrix with categorical support
+    dtest = xgb.DMatrix(
+        combined_df,
+        enable_categorical=True
+    )
+
+    # Make predictions
+    predicted_market_values = xgb_model.predict(dtest)
+
+    # Add predictions to DataFrame
+    features_df['predicted_market_value'] = predicted_market_values
+
+    # Calculate profit margin
+    features_df['predicted_profit_margin'] = (
+        (features_df['predicted_market_value'] - features_df['asking_price']) /
+        features_df['asking_price']
+    )
+
+    # Join with original data
+    private_df = pd.DataFrame(private_listings)
+    private_df['asking_price'] = pd.to_numeric(private_df['asking_price'], errors='coerce')
+    private_df['mileage'] = pd.to_numeric(private_df['mileage'], errors='coerce')
+
+    result = pd.merge(
+        private_df,
+        features_df[['predicted_market_value', 'predicted_profit_margin']],
+        left_index=True,
+        right_index=True,
+        how='inner'
+    )
+
+    # Calculate potential profit
+    result['potential_profit'] = result['predicted_market_value'] - result['asking_price']
+
+    logger.info(f"Predicted market values for {len(result)} private listings using categorical model")
+    logger.info(f"Average predicted market value: £{result['predicted_market_value'].mean():,.0f}")
+    logger.info(f"Average profit margin: {result['predicted_profit_margin'].mean():.2%}")
+
+    return result
+
+
+def predict_with_knn_model(
+    private_listings: List[Dict[str, Any]],
+    knn_model,
+    scaler: StandardScaler,
+    performance_metrics: dict = None
+) -> pd.DataFrame:
+    """Predict market values using KNN model with target-encoded categorical features
+
+    Args:
+        private_listings: List of car listings from private sellers
+        knn_model: Trained KNN model
+        scaler: Feature scaler
+        performance_metrics: Model metadata containing target encodings
+
+    Returns:
+        DataFrame with listings and predicted market values
+    """
+    logger.debug("Using KNN model prediction path")
+
+    # Prepare features with target encodings from model metadata
+    from services.knn_trainer import prepare_knn_features
+
+    # Extract target encodings from performance metrics
+    target_encodings = None
+    if performance_metrics and 'target_encodings' in performance_metrics:
+        target_encodings = performance_metrics['target_encodings']
+        logger.debug(f"Using saved target encodings: {list(target_encodings.keys())}")
+
+    features_df, numeric_features, all_features = prepare_knn_features(
+        private_listings,
+        target_encodings=target_encodings
+    )
+
+    if features_df.empty:
+        logger.warning("No valid features prepared for KNN prediction")
+        return pd.DataFrame()
+
+    # Get feature structure from model metadata
+    if performance_metrics:
+        feature_columns = performance_metrics.get('feature_columns', all_features)
+        logger.debug(f"Using saved feature columns: {feature_columns}")
+    else:
+        feature_columns = all_features
+        logger.warning("No performance metrics provided - using auto-detected features")
+
+    # Ensure all required features exist
+    missing_features = [col for col in feature_columns if col not in features_df.columns]
+    if missing_features:
+        logger.warning(f"Missing features for KNN prediction: {missing_features}")
+        # Use only available features
+        feature_columns = [col for col in feature_columns if col in features_df.columns]
+
+    if not feature_columns:
+        logger.error("No valid features available for KNN prediction")
+        return pd.DataFrame()
+
+    # Scale features
+    X_scaled = scaler.transform(features_df[feature_columns].values)
+
+    # Make predictions using KNN
+    predicted_market_values = knn_model.predict(X_scaled)
+
+    # Add predictions to DataFrame
+    features_df['predicted_market_value'] = predicted_market_values
+
+    # Calculate profit margin
+    features_df['predicted_profit_margin'] = (
+        (features_df['predicted_market_value'] - features_df['asking_price']) /
+        features_df['asking_price']
+    )
+
+    # Join with original data
+    private_df = pd.DataFrame(private_listings)
+    private_df['asking_price'] = pd.to_numeric(private_df['asking_price'], errors='coerce')
+    private_df['mileage'] = pd.to_numeric(private_df['mileage'], errors='coerce')
+
+    result = pd.merge(
+        private_df,
+        features_df[['predicted_market_value', 'predicted_profit_margin']],
+        left_index=True,
+        right_index=True,
+        how='inner'
+    )
+
+    # Calculate potential profit
+    result['potential_profit'] = result['predicted_market_value'] - result['asking_price']
+
+    logger.info(f"Predicted market values for {len(result)} private listings using KNN model")
+    logger.info(f"Average predicted market value: £{result['predicted_market_value'].mean():,.0f}")
+    logger.info(f"Average profit margin: {result['predicted_profit_margin'].mean():.2%}")
+
+    return result
+
+
 def filter_profitable_deals(
     predictions_df: pd.DataFrame,
-    min_margin: float = MIN_PROFIT_MARGIN
+    min_margin: float = MIN_PROFIT_MARGIN,
+    min_cash_profit: float = 800
 ) -> pd.DataFrame:
     """Filter listings to keep only profitable deals
-    
+
     Args:
         predictions_df: DataFrame with listings and predicted profit margins
         min_margin: Minimum profit margin threshold (default 15%)
-        
+        min_cash_profit: Minimum absolute profit in £ (default £800)
+
     Returns:
         DataFrame with only profitable deals
     """
-    # Filter to keep only listings with margin above threshold
-    profitable = predictions_df[predictions_df['predicted_profit_margin'] >= min_margin]
-    
+    # Filter to keep only listings that meet BOTH margin AND cash profit requirements
+    margin_filter = predictions_df['predicted_profit_margin'] >= min_margin
+    cash_filter = predictions_df['potential_profit'] >= min_cash_profit
+
+    profitable = predictions_df[margin_filter & cash_filter]
+
     # Sort by predicted profit margin (highest first)
     profitable = profitable.sort_values('predicted_profit_margin', ascending=False)
-    
-    logger.info(f"Found {len(profitable)} profitable deals with margin >= {min_margin:.1%}")
+
+    logger.info(f"Found {len(profitable)} profitable deals with margin >= {min_margin:.1%} AND profit >= £{min_cash_profit}")
     return profitable
 
 
@@ -1627,13 +1952,13 @@ def _process_individual_model(make: str, model: str = None, max_pages: int = Non
                 })
 
     # Step 4: Load or train model
-    xgb_model, scaler = load_or_train_model(make, model, enriched_dealer_listings)
-    if xgb_model is None or scaler is None:
+    trained_model, scaler, performance_metrics = load_or_train_model(make, model, enriched_dealer_listings)
+    if trained_model is None or scaler is None:
         logger.error(f"Failed to create model for {make} {model or 'all'}")
         return
-    
+
     # Step 5: Predict on private listings
-    predictions_df = predict_market_values(private_listings, xgb_model, scaler)
+    predictions_df = predict_market_values(private_listings, trained_model, scaler, performance_metrics)
     
     # Step 6: Filter for profitable deals
     profitable_deals = filter_profitable_deals(predictions_df)
@@ -1692,23 +2017,29 @@ def main():
     parser.add_argument("--model", type=str, help="Test specific model (e.g., '3 series', 'fiesta', 'yaris')")
     parser.add_argument("--weekly-training", action="store_true", help="Force weekly retail scraping and model training")
     parser.add_argument("--no-proxy", action="store_true", help="Disable proxy rotation")
+    parser.add_argument("--knn", action="store_true", help="Use K-Nearest Neighbors instead of XGBoost for ML predictions")
     
     args = parser.parse_args()
     
     # Set execution mode
     if args.test:
         set_execution_mode("test")
-        
+
+    # Set model type
+    if args.knn:
+        set_model_type(True)
+
     # Get configuration
     retail_config = get_weekly_retail_config()
     verify_ssl = retail_config.get('verify_ssl', False)
-    
+
     from src.output_manager import get_output_manager
     output_manager = get_output_manager()
     output_manager.startup_banner()
     output_manager.info(f"Mode: {get_execution_mode()}")
-    
-    
+    output_manager.info(f"ML Model: {get_model_type()}")
+
+
     # Handle safe individual model testing
     if args.test and args.model:
         make = get_make_from_model(args.model)
@@ -1991,12 +2322,12 @@ def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: D
                 })
 
             # Load or train model for this make/model
-            xgb_model, scaler = load_or_train_model(make, model, dealer_data, force_retrain)
+            trained_model, scaler, performance_metrics = load_or_train_model(make, model, dealer_data, force_retrain)
 
-            if xgb_model is None or scaler is None:
+            if trained_model is None or scaler is None:
                 output_manager.ml_model_status(f"❌ Unable to create model for {make} {model} - skipping analysis")
                 continue
-            
+
             # Predict on private listings
             private_data = []
             for listing in private_listings:
@@ -2010,9 +2341,9 @@ def _enhanced_analyse_listings_individual(listings: List[Dict[str, Any]], cfg: D
                     'url': listing.get('url', ''),
                     'spec': listing.get('spec', '')
                 })
-            
+
             # Analyze private listings with trained model
-            predictions_df = predict_market_values(private_data, xgb_model, scaler)
+            predictions_df = predict_market_values(private_data, trained_model, scaler, performance_metrics)
 
             # Convert predictions back to listings format and add analysis results
             processed_count = 0
